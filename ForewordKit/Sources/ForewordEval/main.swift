@@ -29,6 +29,9 @@ if let v = flag("--min-ext").flatMap(Double.init) { options.minExtensionProbabil
 if let v = flag("--min-first").flatMap(Double.init) { options.minFirstWordProbability = v }
 if let v = flag("--min-word").flatMap(Double.init) { options.minWordCompletionProbability = v }
 if let v = flag("--min-expected").flatMap(Double.init) { options.minExpectedCharacters = v }
+if let v = flag("--phrase-ext").flatMap(Double.init) { options.minPhraseExtensionProbability = v }
+if let v = flag("--phrase-joint").flatMap(Double.init) { options.minPhraseJointProbability = v }
+if let v = flag("--phrase-token").flatMap(Double.init) { options.minPhraseTokenProbability = v }
 let trace = args.contains("--trace")
 let verbose = args.contains("--verbose")
 
@@ -77,6 +80,7 @@ case "cases":
 case "sim":
     _ = try? engine.completeNow(CompletionRequest(context: "", prefix: "Hello there, how are", options: options))
     var totalChars = 0, keystrokes = 0, shown = 0, correct = 0, wrong = 0, savedChars = 0, full = 0, wrongChars = 0
+    var shownWords = 0.0, multiWord = 0, firstWordRight = 0
     var latencies: [Double] = []
     for doc in simDocuments {
         let header: String
@@ -100,6 +104,9 @@ case "sim":
             shown += 1
             let (accepted, presses) = acceptedLength(suggestion: r.text, truth: truth)
             if truth.hasPrefix(r.text) { full += 1 }
+            let words = TextAnalysis.wordCount(r.text)
+            shownWords += words
+            if words >= 2 { multiWord += 1 }
             wrongChars += max(0, r.text.count - accepted)
             if accepted > 0 {
                 correct += 1
@@ -122,6 +129,8 @@ case "sim":
                  totalChars, keystrokes, savings, shown, Double(shown) / Double(keystrokes) * 100,
                  Double(correct) / Double(max(shown, 1)) * 100, Double(full) / Double(max(shown, 1)) * 100, wrong,
                  Double(wrongChars) / Double(keystrokes)))
+    print(String(format: "avg %.1f words per suggestion, %.0f%% multi-word", shownWords / Double(max(shown, 1)),
+                 Double(multiWord) / Double(max(shown, 1)) * 100))
     print(String(format: "latency p50 %.1fms p90 %.1fms p99 %.1fms max %.1fms", percentile(latencies, 0.5),
                  percentile(latencies, 0.9), percentile(latencies, 0.99), latencies.max() ?? 0))
 

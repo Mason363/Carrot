@@ -87,6 +87,22 @@ public enum TextAnalysis {
         }
     }
 
+    /// Words a suggestion should not end on ("…and", "…the", "…I am").
+    public static let danglingWords: Set<String> = [
+        "and", "or", "but", "nor", "the", "a", "an", "to", "of", "in", "on", "at", "for", "with", "from", "by",
+        "i", "we", "you", "he", "she", "they", "it", "is", "am", "are", "was", "were", "be", "been", "that",
+        "which", "who", "my", "your", "our", "their", "his", "her", "its", "as", "so", "if", "than", "then",
+        "because", "about", "into", "very", "really", "just", "will", "would", "can", "could", "should",
+        "have", "has", "had", "do", "does", "this", "these", "those", "some", "any", "more", "most",
+        "y", "o", "el", "la", "los", "las", "de", "en", "un", "una", "que", "le", "les", "et", "der", "die", "das", "und",
+    ]
+
+    /// Whether `text` ends on a word a suggestion shouldn't stop at.
+    public static func endsDangling(_ text: String) -> Bool {
+        guard let last = text.split(whereSeparator: { $0.isWhitespace }).last else { return false }
+        return danglingWords.contains(last.lowercased())
+    }
+
     /// Sentence-ending punctuation (Latin and CJK).
     static func isSentenceEnd(_ c: Character) -> Bool {
         ".!?。！？…".contains(c)

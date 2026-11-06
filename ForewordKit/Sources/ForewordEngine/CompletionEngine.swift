@@ -348,10 +348,13 @@ public final class CompletionEngine: @unchecked Sendable {
                     }
                 }
                 // Nothing past this point could be shown: the joint probability only decreases.
+                // Within the phrase target the looser phrase thresholds apply.
                 let prospectiveJoint = runningJoint * probability
-                let jointFloor = sawContent ? options.minJointProbability
-                    : min(options.minFirstWordProbability, options.minWordCompletionProbability)
-                if !midLine && (Double(probability) < options.minTokenProbability || Double(prospectiveJoint) < jointFloor) {
+                let withinTarget = TextAnalysis.wordCount(String(decoding: output, as: UTF8.self)) < Double(options.length.targetWords)
+                let jointFloor = !sawContent ? min(options.minFirstWordProbability, options.minWordCompletionProbability)
+                    : (withinTarget ? options.minPhraseJointProbability : options.minJointProbability)
+                let tokenFloor = withinTarget ? options.minPhraseTokenProbability : options.minTokenProbability
+                if !midLine && (Double(probability) < tokenFloor || Double(prospectiveJoint) < jointFloor) {
                     stop = .lowConfidence
                     lastWordComplete = boundary || flags.contains(.containsNewline)
                     break decodeLoop
@@ -485,15 +488,7 @@ public final class CompletionEngine: @unchecked Sendable {
         return false
     }
 
-    /// Words a suggestion should not end on.
-    private static let danglingWords: Set<String> = [
-        "and", "or", "but", "nor", "the", "a", "an", "to", "of", "in", "on", "at", "for", "with", "from", "by",
-        "i", "we", "you", "he", "she", "they", "it", "is", "am", "are", "was", "were", "be", "been", "that",
-        "which", "who", "my", "your", "our", "their", "his", "her", "its", "as", "so", "if", "than", "then",
-        "because", "about", "into", "very", "really", "just", "will", "would", "can", "could", "should",
-        "have", "has", "had", "do", "does", "this", "these", "those", "some", "any", "more", "most",
-        "y", "o", "el", "la", "los", "las", "de", "en", "un", "una", "que", "le", "les", "et", "der", "die", "das", "und",
-    ]
+    private static var danglingWords: Set<String> { TextAnalysis.danglingWords }
 
     /// Picks the longest prefix of the generated text that ends on a word boundary and that the
     /// model is confident about.
@@ -535,8 +530,12 @@ public final class CompletionEngine: @unchecked Sendable {
             let segment = String(decoding: output[previousCut..<step.end], as: UTF8.self)
             let previousJoint = cuts.last?.joint ?? 1
             let conditional = cuts.isEmpty ? 1 : joint / max(previousJoint, 1e-6)
-            if Double(joint) >= options.minJointProbability && Double(minProbability) >= options.minTokenProbability
-                && Double(conditional) >= options.minExtensionProbability {
+            // Phrases: up to the target length a further word only has to be plausible.
+            let withinTarget = cuts.count < options.length.targetWords
+            let jointFloor = withinTarget ? options.minPhraseJointProbability : options.minJointProbability
+            let tokenFloor = withinTarget ? options.minPhraseTokenProbability : options.minTokenProbability
+            let extensionFloor = withinTarget ? options.minPhraseExtensionProbability : options.minExtensionProbability
+            if Double(joint) >= jointFloor && Double(minProbability) >= tokenFloor && Double(conditional) >= extensionFloor {
                 expected += joint * Float(segment.count)
                 previousCut = step.end
                 let word = segment.trimmingCharacters(in: .whitespaces).lowercased()
@@ -559,10 +558,12 @@ public final class CompletionEngine: @unchecked Sendable {
         while cuts.count > 1, Self.danglingWords.contains(cuts[cuts.count - 1].lastWord) {
             cuts.removeLast()
         }
-        let best = cuts[cuts.count - 1]
+        var best = cuts[cuts.count - 1]
         // Worth showing? Word completions are cheap to ignore; full words must pay for the glance.
-        if !completesWord || cuts.count > 1 {
-            guard Double(best.expected) >= options.minExpectedCharacters || Double(firstWord) >= 0.6 else { return nil }
+        if !(Double(best.expected) >= options.minExpectedCharacters || Double(firstWord) >= 0.6) {
+            // A phrase that isn't worth it can still be worth finishing the word under the cursor.
+            guard completesWord else { return nil }
+            best = cuts[0]
         }
         let bestJoint = best.joint
 

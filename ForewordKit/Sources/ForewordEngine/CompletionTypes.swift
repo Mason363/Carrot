@@ -6,17 +6,27 @@ public enum SuggestionLength: String, Codable, CaseIterable, Sendable {
 
     var maxTokens: Int {
         switch self {
-        case .short: return 8
-        case .medium: return 16
-        case .long: return 32
+        case .short: return 10
+        case .medium: return 18
+        case .long: return 36
         }
     }
 
     var maxWords: Double {
         switch self {
-        case .short: return 5
-        case .medium: return 12
-        case .long: return 26
+        case .short: return 6
+        case .medium: return 10
+        case .long: return 24
+        }
+    }
+
+    /// Suggestions aim for phrases of about this many words: within it, each further word only
+    /// needs to be plausible; beyond it, it has to be likely.
+    var targetWords: Int {
+        switch self {
+        case .short: return 3
+        case .medium: return 5
+        case .long: return 9
         }
     }
 
@@ -32,7 +42,7 @@ public enum SuggestionLength: String, Codable, CaseIterable, Sendable {
 public struct CompletionOptions: Sendable, Equatable {
     public var length: SuggestionLength = .medium
     /// Probability the first word must reach for anything to be shown.
-    public var minFirstWordProbability: Double = 0.36
+    public var minFirstWordProbability: Double = 0.40
     /// The suggestion grows word by word while its joint probability stays above this.
     public var minJointProbability: Double = 0.12
     /// Any single token below this probability ends the suggestion.
@@ -43,8 +53,12 @@ public struct CompletionOptions: Sendable, Equatable {
     public var minWordCompletionProbability: Double = 0.24
     /// Expected number of characters the user would accept; below this a suggestion isn't worth a glance.
     public var minExpectedCharacters: Double = 3.0
-    /// Each word after the first must be at least this likely given the words before it.
+    /// Beyond the target length, each further word must be at least this likely given the words before it.
     public var minExtensionProbability: Double = 0.5
+    /// Within the target length (a few words), the thresholds for growing a phrase.
+    public var minPhraseExtensionProbability: Double = 0.08
+    public var minPhraseJointProbability: Double = 0.008
+    public var minPhraseTokenProbability: Double = 0.025
     /// Allow suggestions when there is text after the cursor on the same line.
     public var allowMidLine = true
     /// Penalise verbatim repetition of the user's own text.
@@ -57,13 +71,16 @@ public struct CompletionOptions: Sendable, Equatable {
     /// and ~70% right in full while saving ~46% of keystrokes on Qwen3.5 2B.
     public mutating func applyEagerness(_ eagerness: Double) {
         let e = min(max(eagerness, 0), 1)
-        minFirstWordProbability = 0.50 - 0.28 * e        // 0.50 … 0.22
+        minFirstWordProbability = 0.54 - 0.28 * e        // 0.54 … 0.26
         minJointProbability = 0.18 - 0.12 * e            // 0.18 … 0.06
         minTokenProbability = 0.15 - 0.08 * e            // 0.15 … 0.07
         minExtensionProbability = 0.62 - 0.24 * e        // 0.62 … 0.38
         minWordCompletionProbability = 0.34 - 0.20 * e   // 0.34 … 0.14
         minExpectedCharacters = 4.0 - 2.0 * e            // 4.0 … 2.0
         minFillerProbability = 0.85 - 0.30 * e           // 0.85 … 0.55
+        minPhraseExtensionProbability = 0.13 - 0.10 * e  // 0.13 … 0.03
+        minPhraseJointProbability = 0.016 - 0.016 * e   // 0.016 … 0
+        minPhraseTokenProbability = 0.04 - 0.03 * e      // 0.04 … 0.01
     }
 }
 
