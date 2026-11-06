@@ -52,6 +52,7 @@ rm "$DIST/Foreword.zip"
 echo "==> Building the disk image"
 create-dmg \
   --volname "Foreword" \
+  --background "$ROOT/Resources/DMG/background.tiff" \
   --window-pos 200 160 --window-size 560 340 \
   --icon-size 112 --text-size 13 \
   --icon "Foreword.app" 150 160 \

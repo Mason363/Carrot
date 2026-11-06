@@ -102,6 +102,8 @@ enum MenuBarIcon {
             caret.move(to: NSPoint(x: 5, y: 2.5)); caret.line(to: NSPoint(x: 5, y: 13.5))
             caret.move(to: NSPoint(x: 3, y: 2.5)); caret.line(to: NSPoint(x: 7, y: 2.5))
             caret.move(to: NSPoint(x: 3, y: 13.5)); caret.line(to: NSPoint(x: 7, y: 13.5))
+            // Inactive: the whole glyph dims, like a disabled menu bar item.
+            NSGraphicsContext.current?.cgContext.setAlpha(active ? 1 : 0.45)
             caret.stroke()
             // Ghost text: dashes after the caret
             let ghost = NSBezierPath()
@@ -109,7 +111,7 @@ enum MenuBarIcon {
             ghost.lineCapStyle = .round
             ghost.move(to: NSPoint(x: 9.5, y: 6)); ghost.line(to: NSPoint(x: 11.5, y: 6))
             ghost.move(to: NSPoint(x: 14, y: 6)); ghost.line(to: NSPoint(x: 16, y: 6))
-            NSGraphicsContext.current?.cgContext.setAlpha(active ? 0.55 : 0.25)
+            NSGraphicsContext.current?.cgContext.setAlpha(active ? 0.55 : 0.2)
             ghost.stroke()
             return true
         }

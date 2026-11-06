@@ -163,6 +163,19 @@ final class TestBenchController: NSObject, WKNavigationDelegate {
             ("onboarding", AnyView(OnboardingView(onFinish: {})), 560),
             ("onboarding-try", AnyView(OnboardingView(onFinish: {}, initialStep: 3)), 560),
         ]
+        // Menu bar icon (template) at 1x/2x, drawn black on white for review.
+        for active in [true, false] {
+            let icon = MenuBarIcon.image(active: active)
+            let canvas = NSImage(size: NSSize(width: 72, height: 64), flipped: false) { rect in
+                NSColor.white.setFill(); rect.fill()
+                icon.draw(in: rect)
+                return true
+            }
+            if let tiff = canvas.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) {
+                try? rep.representation(using: .png, properties: [:])?
+                    .write(to: URL(fileURLWithPath: directory).appendingPathComponent("menubar-\(active ? "on" : "off").png"))
+            }
+        }
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             for (name, view, width) in views {
                 let hosting = NSHostingView(rootView: view.frame(width: width).fixedSize(horizontal: false, vertical: true)
