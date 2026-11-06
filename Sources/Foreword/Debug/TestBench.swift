@@ -32,6 +32,7 @@ final class TestBenchController: NSObject, WKNavigationDelegate {
     private var textField: NSTextField!
     private var webView: WKWebView!
     private var current = "textview"
+    private var downloadReport = ""
 
     func startObserving() {
         DistributedNotificationCenter.default().addObserver(
@@ -128,6 +129,19 @@ final class TestBenchController: NSObject, WKNavigationDelegate {
         case "accept":
             SuggestionController.shared.debugAccept(all: cmd["all"] as? Bool ?? true)
             try? await Task.sleep(nanoseconds: 400_000_000)
+        case "download":
+            guard let spec = ModelCatalog.spec(id: cmd["model"] as? String ?? "") else { break }
+            let models = ModelManager.shared
+            let started = Date()
+            models.download(spec)
+            // Wait for the download, verification and install to finish (or fail).
+            while Date().timeIntervalSince(started) < 1800 {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                if case .downloading = models.status { continue }
+                if models.status == .verifying || models.status == .loading { continue }
+                break
+            }
+            downloadReport = "status=\(models.status) downloaded=\(ModelCatalog.isDownloaded(spec)) seconds=\(Int(Date().timeIntervalSince(started)))"
         case "render":
             renderViews(to: cmd["dir"] as? String ?? NSTemporaryDirectory())
         case "wait":
@@ -185,6 +199,7 @@ final class TestBenchController: NSObject, WKNavigationDelegate {
         var state = SuggestionController.shared.debugState
         state["benchFrame"] = window.map { NSStringFromRect($0.frame) } ?? ""
         state["overlayFrame"] = SuggestionController.shared.debugOverlayFrame
+        state["download"] = downloadReport
         state["screenHeight"] = NSScreen.screens.first?.frame.height ?? 0
         state["benchField"] = current
         if let data = try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys]) {

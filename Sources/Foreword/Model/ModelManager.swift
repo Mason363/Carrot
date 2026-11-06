@@ -197,7 +197,13 @@ final class ModelManager: NSObject, ObservableObject {
                 self.downloadTask = nil
                 self.downloadingSpec = nil
                 if ok {
-                    if Preferences.shared.modelID == spec.id { self.engine = nil }
+                    if Preferences.shared.modelID == spec.id {
+                        // Load the model that was just downloaded.
+                        self.engine = nil
+                        self.loadedModelID = nil
+                    }
+                    self.status = self.engine != nil ? .ready : .notDownloaded
+                    self.objectWillChange.send()
                     self.start()
                 } else {
                     self.status = .failed("The download was corrupted. Please try again.")

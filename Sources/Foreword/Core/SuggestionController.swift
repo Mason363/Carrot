@@ -42,6 +42,7 @@ final class SuggestionController: ObservableObject {
     private var geometry: FieldReader.CachedGeometry?
     private var fieldStartText: String?
     private var focusCheckInFlight = false
+    private var lastFocusedElement: AXElement?
     private var snapshotInFlight = false
     private var snapshotDirty = false
 
@@ -221,11 +222,14 @@ final class SuggestionController: ObservableObject {
         // Never send Accessibility queries to ourselves from a background thread (they run in-process).
         if observedPID == nil,
            NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+            lastFocusedElement = nil
             if field != nil { setField(nil) }
             return
         }
         focusCheckInFlight = true
-        let current = field?.element
+        // Compare with whatever had focus last time — text field or not — so the periodic check is
+        // a single cheap query while focus stays put.
+        let current = lastFocusedElement
         let ownPID = ProcessInfo.processInfo.processIdentifier
         AXQueue.queue.async { [weak self] in
             var element = observedPID.map(FieldReader.focusedElement(inApp:)) ?? FieldReader.focusedElement()
@@ -239,7 +243,10 @@ final class SuggestionController: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.focusCheckInFlight = false
-                if changed { self.setField(info) }
+                if changed {
+                    self.lastFocusedElement = element
+                    if info != self.field || info == nil { self.setField(info) }
+                }
             }
         }
     }
@@ -516,7 +523,7 @@ final class SuggestionController: ObservableObject {
         current.anchorPrefix += typed
         current.typedSinceShown += typed.count
         if current.remaining.trimmingCharacters(in: .whitespaces).isEmpty {
-            noteAccepted(characters: current.typedSinceShown, explicit: false)
+            // The user typed the whole suggestion themselves: a good prediction, but nothing written for them.
             hide()
             return
         }
