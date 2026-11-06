@@ -16,14 +16,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated {
             NSApp.setActivationPolicy(.accessory)
             let prefs = Preferences.shared
-            ModelManager.shared.start()
+            if !TestBench.benchOnly { ModelManager.shared.start() }
 
             if TestBench.isActive {
                 TestBenchController.shared.start()
-                SuggestionController.shared.start()
+                if !TestBench.benchOnly { SuggestionController.shared.start() }
                 return
             }
-            if TestBench.observedBundleID != nil {
+            if TestBench.observedBundleID != nil || TestBench.isLiveTest {
                 TestBenchController.shared.startObserving()
                 SuggestionController.shared.start()
                 return

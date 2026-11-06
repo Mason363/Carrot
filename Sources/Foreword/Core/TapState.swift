@@ -35,8 +35,8 @@ final class TapState: @unchecked Sendable {
     private var remaining = ""
     private var isCorrection = false
     private var version: UInt64 = 0
-    private var acceptAllKey = KeyCombo.tab
-    private var acceptWordKey = KeyCombo.optionRight
+    private var acceptAllKey = KeyCombo.shiftTab
+    private var acceptWordKey = KeyCombo.tab
     private var dismissKey = KeyCombo.escape
     private var toggleKey: KeyCombo?
 
@@ -81,8 +81,9 @@ final class TapState: @unchecked Sendable {
         if acceptAllKey.matches(keyCode: keyCode, flags: flags) {
             return (true, .acceptAll, .accept, basedOn)
         }
-        if !isCorrection, acceptWordKey.matches(keyCode: keyCode, flags: flags) {
-            return (true, .acceptWord, .accept, basedOn)
+        if acceptWordKey.matches(keyCode: keyCode, flags: flags) {
+            // A spelling fix is one word: either key applies it.
+            return (true, isCorrection ? .acceptAll : .acceptWord, .accept, basedOn)
         }
         if dismissKey.matches(keyCode: keyCode, flags: flags) {
             visible = false

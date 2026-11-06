@@ -82,10 +82,20 @@ enum TextInserter {
         return source
     }()
 
+    /// Observe mode only: the field to edit through Accessibility (the observed app is in the
+    /// background, so synthesized key events would reach whichever app the user is in).
+    @MainActor static var observedTarget: AXElement?
+
     @MainActor
     static func type(_ text: String) {
         guard !text.isEmpty else { return }
         if TestBench.isActive { TestBench.insertHandler?(text); return }
+        if TestBench.observedBundleID != nil {
+            if let target = observedTarget {
+                AXQueue.queue.async { target.set(kAXSelectedTextAttribute, text as CFString) }
+            }
+            return
+        }
         let units = Array(text.utf16)
         var index = 0
         while index < units.count {
@@ -114,6 +124,20 @@ enum TextInserter {
     static func backspace(count: Int) {
         guard count > 0 else { return }
         if TestBench.isActive { TestBench.backspaceHandler?(count); return }
+        if TestBench.observedBundleID != nil {
+            if let target = observedTarget {
+                AXQueue.queue.async {
+                    guard let range = target.range(kAXSelectedTextRangeAttribute) else { return }
+                    let start = max(0, range.location - count)
+                    var r = CFRange(location: start, length: range.location - start)
+                    if let value = AXValueCreate(.cfRange, &r) {
+                        target.set(kAXSelectedTextRangeAttribute, value)
+                        target.set(kAXSelectedTextAttribute, "" as CFString)
+                    }
+                }
+            }
+            return
+        }
         for _ in 0..<count {
             for keyDown in [true, false] {
                 guard let event = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: keyDown) else { continue }

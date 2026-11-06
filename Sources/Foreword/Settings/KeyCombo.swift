@@ -17,6 +17,7 @@ struct KeyCombo: Codable, Equatable, Hashable {
     var modifierFlags: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: modifiers) }
 
     static let tab = KeyCombo(keyCode: UInt16(kVK_Tab))
+    static let shiftTab = KeyCombo(keyCode: UInt16(kVK_Tab), modifiers: .shift)
     static let optionRight = KeyCombo(keyCode: UInt16(kVK_RightArrow), modifiers: .option)
     static let escape = KeyCombo(keyCode: UInt16(kVK_Escape))
     static let rightArrow = KeyCombo(keyCode: UInt16(kVK_RightArrow))

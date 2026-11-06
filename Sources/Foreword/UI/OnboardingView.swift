@@ -188,8 +188,8 @@ struct OnboardingView: View {
             Text("Start typing in Notes, Mail or anywhere else. When gray text appears:")
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 10) {
-                KeyHintRow(keys: prefs.acceptAllKey.displayString, text: "accepts the whole suggestion")
                 KeyHintRow(keys: prefs.acceptWordKey.displayString, text: "accepts the next word")
+                KeyHintRow(keys: prefs.acceptAllKey.displayString, text: "accepts the whole suggestion")
                 KeyHintRow(keys: "Keep typing", text: "if it matches, the suggestion follows along")
                 KeyHintRow(keys: prefs.dismissKey.displayString, text: "dismisses it")
             }
@@ -211,6 +211,9 @@ struct OnboardingView: View {
                         clipboard.requestAccess()
                     }
                 }
+            }
+            if NSSpellChecker.isAutomaticInlinePredictionEnabled {
+                SystemPredictionNotice()
             }
             Text("Tell Foreword a little about yourself in Settings › Personal so it can fill in your name and details.")
                 .font(.callout).foregroundStyle(.secondary)

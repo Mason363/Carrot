@@ -1,6 +1,13 @@
 import AppKit
 import CoreText
 
+/// A continuation line of a wrapped inline suggestion, in view coordinates (y down).
+struct GhostLine: Equatable {
+    var text: String
+    var x: CGFloat
+    var baseline: CGFloat
+}
+
 /// What the overlay shows.
 struct GhostContent: Equatable {
     enum Style: Equatable {
@@ -21,6 +28,14 @@ struct GhostContent: Equatable {
     /// Inline: distance from the top of the view to the text baseline.
     var baseline: CGFloat
     var lineHeight: CGFloat
+    /// Inline: where the first glyph starts, from the view's left edge. Fractional on purpose: the
+    /// panel sits on the pixel grid while the text lands exactly where the app would draw it.
+    var originX: CGFloat = 0
+    /// Whether kerning applies between a space and the letter after it. WebKit shapes each word with
+    /// its trailing space on its own, so it never kerns across into the next word.
+    var kernsAfterSpaces = true
+    /// Inline: further lines when the suggestion wraps.
+    var extraLines: [GhostLine] = []
 }
 
 /// Borderless, click-through, never-key panel that floats above everything (including full-screen apps).
@@ -71,16 +86,28 @@ final class GhostView: NSView {
         context.clear(bounds)
         switch content.style {
         case .inline:
-            drawLine(content.text, font: content.font, color: content.color, x: 0, baseline: content.baseline, in: context)
+            drawLine(content.text, font: content.font, color: content.color, x: content.originX, baseline: content.baseline,
+                     kernsAfterSpaces: content.kernsAfterSpaces, in: context)
+            for line in content.extraLines {
+                drawLine(line.text, font: content.font, color: content.color, x: line.x, baseline: line.baseline,
+                         kernsAfterSpaces: content.kernsAfterSpaces, in: context)
+            }
         case .pill, .correction:
             drawPill(content, in: context)
         }
     }
 
-    private func drawLine(_ text: String, font: NSFont, color: NSColor, x: CGFloat, baseline: CGFloat, in context: CGContext) {
-        let attributed = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color])
+    private func drawLine(_ text: String, font: NSFont, color: NSColor, x: CGFloat, baseline: CGFloat,
+                          kernsAfterSpaces: Bool = true, in context: CGContext) {
+        let attributed = Self.attributed(text, font: font, color: color, kernsAfterSpaces: kernsAfterSpaces)
         let line = CTLineCreateWithAttributedString(attributed)
         context.saveGState()
+        // Fractional glyph positions, like the apps whose text we continue.
+        context.setAllowsFontSubpixelPositioning(true)
+        context.setShouldSubpixelPositionFonts(true)
+        // Same glyph-position quantization AppKit text uses.
+        context.setAllowsFontSubpixelQuantization(true)
+        context.setShouldSubpixelQuantizeFonts(true)
         // Flipped view: undo the flip for CoreText.
         context.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
         context.textPosition = CGPoint(x: x, y: baseline)
@@ -141,9 +168,45 @@ final class GhostView: NSView {
     }
 
     static func width(of text: String, font: NSFont) -> CGFloat {
-        let attributed = NSAttributedString(string: text, attributes: [.font: font])
-        let line = CTLineCreateWithAttributedString(attributed)
-        return ceil(CTLineGetTypographicBounds(line, nil, nil, nil))
+        ceil(exactWidth(of: text, font: font))
+    }
+
+    /// The typographic advance of `text`, unrounded: where the pen ends up after drawing it.
+    static func exactWidth(of text: String, font: NSFont, kernsAfterSpaces: Bool = true) -> CGFloat {
+        let line = CTLineCreateWithAttributedString(attributed(text, font: font, color: nil, kernsAfterSpaces: kernsAfterSpaces))
+        return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+    }
+
+    /// `text` styled for drawing. Without kerning after spaces, each space gets a zero kern, which
+    /// turns off the pair it would form with the next letter (the letter before it keeps its pair).
+    static func attributed(_ text: String, font: NSFont, color: NSColor?, kernsAfterSpaces: Bool) -> NSAttributedString {
+        var attributes: [NSAttributedString.Key: Any] = [.font: font]
+        if let color { attributes[.foregroundColor] = color }
+        let string = NSMutableAttributedString(string: text, attributes: attributes)
+        if !kernsAfterSpaces {
+            let ns = text as NSString
+            var index = 0
+            while index < ns.length {
+                let found = ns.range(of: " ", range: NSRange(location: index, length: ns.length - index))
+                guard found.location != NSNotFound else { break }
+                string.addAttribute(.kern, value: 0.0, range: found)
+                index = found.location + 1
+            }
+        }
+        return string
+    }
+
+    /// How far kerning moves `next` when it follows `previous` (zero across a ligature, which can't be
+    /// continued in a separate layer anyway).
+    static func pairKerning(_ previous: Character, _ next: Character, font: NSFont, kernsAfterSpaces: Bool) -> CGFloat {
+        if previous == " " && !kernsAfterSpaces { return 0 }
+        if previous.isWhitespace && previous != " " || next.isNewline || previous.isNewline { return 0 }
+        let pair = String(previous) + String(next)
+        let line = CTLineCreateWithAttributedString(attributed(pair, font: font, color: nil, kernsAfterSpaces: kernsAfterSpaces))
+        guard CTLineGetGlyphCount(line) == pair.utf16.count else { return 0 }
+        let kern = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+            - exactWidth(of: String(previous), font: font) - exactWidth(of: String(next), font: font)
+        return abs(kern) < font.pointSize * 0.3 ? kern : 0
     }
 
     /// Size the pill needs for `content`.

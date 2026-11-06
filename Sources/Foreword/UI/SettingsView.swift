@@ -51,6 +51,9 @@ struct GeneralSettings: View {
                     }
                 }
             }
+            if NSSpellChecker.isAutomaticInlinePredictionEnabled {
+                Section { SystemPredictionNotice() }
+            }
             Section {
                 Toggle("Show suggestions", isOn: $prefs.isEnabled)
                 Toggle("Open at login", isOn: $launchAtLogin)
@@ -76,9 +79,9 @@ struct GeneralSettings: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Picker("Length", selection: $prefs.length) {
-                    Text("A few words").tag(SuggestionLength.short)
-                    Text("Up to a sentence").tag(SuggestionLength.medium)
-                    Text("Up to two sentences").tag(SuggestionLength.long)
+                    Text("Short · 2–3 words").tag(SuggestionLength.short)
+                    Text("Medium · 3–6 words").tag(SuggestionLength.medium)
+                    Text("Long · up to a sentence").tag(SuggestionLength.long)
                 }
                 Toggle(isOn: $prefs.midLineSuggestions) {
                     Text("Suggest in the middle of a line")
@@ -98,6 +101,27 @@ struct GeneralSettings: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// macOS's own inline predictions draw in the same place as Foreword's.
+struct SystemPredictionNotice: View {
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: "text.badge.xmark").foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("macOS is showing its own predictions too").font(.headline)
+                Text("They appear in the same spot as Foreword's. Turn off “Show inline predictive text” in Keyboard › Text Input › Edit.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button("Open Keyboard Settings") {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+        }
     }
 }
 
@@ -156,11 +180,12 @@ struct KeyboardSettings: View {
     var body: some View {
         Form {
             Section {
-                LabeledContent("Accept suggestion") { KeyRecorder(combo: $prefs.acceptAllKey) }
                 LabeledContent("Accept next word") { KeyRecorder(combo: $prefs.acceptWordKey) }
+                LabeledContent("Accept whole suggestion") { KeyRecorder(combo: $prefs.acceptAllKey) }
                 LabeledContent("Dismiss") { KeyRecorder(combo: $prefs.dismissKey) }
+                Toggle("Include punctuation when accepting a word", isOn: $prefs.wordIncludesPunctuation)
             } footer: {
-                Text("These keys are only taken over while a suggestion is showing; otherwise they work as usual.")
+                Text("These keys are only taken over while a suggestion is showing; otherwise they work as usual. Without punctuation, a word is accepted on its own (“Thursday”), and the comma or period after it comes with the next press.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {
@@ -182,8 +207,9 @@ struct KeyboardSettings: View {
             }
             Section {
                 Button("Restore Defaults") {
-                    prefs.acceptAllKey = .tab
-                    prefs.acceptWordKey = .optionRight
+                    prefs.acceptWordKey = .tab
+                    prefs.acceptAllKey = .shiftTab
+                    prefs.wordIncludesPunctuation = false
                     prefs.dismissKey = .escape
                     prefs.toggleShortcut = nil
                 }

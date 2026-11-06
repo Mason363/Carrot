@@ -34,6 +34,8 @@ final class Preferences: ObservableObject {
     @Published var ghostColor: GhostColor { didSet { defaults.set(ghostColor.rawValue, forKey: "ghostColor") } }
     @Published var ghostOpacity: Double { didSet { defaults.set(ghostOpacity, forKey: "ghostOpacity") } }
     @Published var showKeyHint: Bool { didSet { defaults.set(showKeyHint, forKey: "showKeyHint") } }
+    /// Accepting a word also takes the punctuation attached to it ("Thursday," rather than "Thursday").
+    @Published var wordIncludesPunctuation: Bool { didSet { defaults.set(wordIncludesPunctuation, forKey: "wordIncludesPunctuation") } }
     /// Explicit per-app choices (bundle id → enabled). Apps without an entry use `AppRules` defaults.
     @Published var appOverrides: [String: Bool] { didSet { defaults.set(appOverrides, forKey: "appOverrides") } }
     /// Websites (domains) where Foreword stays quiet.
@@ -50,15 +52,23 @@ final class Preferences: ObservableObject {
         defaults.register(defaults: [
             "isEnabled": true, "eagerness": 0.5, "length": SuggestionLength.medium.rawValue,
             "typoCorrection": true, "midLineSuggestions": true, "ghostColor": GhostColor.automatic.rawValue,
-            "ghostOpacity": 0.45, "showKeyHint": true, "memoryEnabled": true, "useScreenContext": true, "useClipboard": true,
+            "ghostOpacity": 0.45, "showKeyHint": true, "wordIncludesPunctuation": false,
+            "memoryEnabled": true, "useScreenContext": true, "useClipboard": true,
             "modelID": ModelCatalog.defaultModel.id, "hasCompletedOnboarding": false,
         ])
         isEnabled = defaults.bool(forKey: "isEnabled")
         pausedUntil = defaults.object(forKey: "pausedUntil") as? Date
         eagerness = defaults.double(forKey: "eagerness")
         length = SuggestionLength(rawValue: defaults.string(forKey: "length") ?? "") ?? .medium
-        acceptAllKey = Self.load("acceptAllKey", defaults) ?? .tab
-        acceptWordKey = Self.load("acceptWordKey", defaults) ?? .optionRight
+        var acceptAll: KeyCombo = Self.load("acceptAllKey", defaults) ?? .shiftTab
+        var acceptWord: KeyCombo = Self.load("acceptWordKey", defaults) ?? .tab
+        // Tab used to accept everything and ⌥→ a word; Tab now takes the next word and ⇧Tab everything.
+        if defaults.integer(forKey: "shortcutsVersion") < 2 {
+            if acceptAll == .tab && acceptWord == .optionRight { acceptAll = .shiftTab; acceptWord = .tab }
+            defaults.set(2, forKey: "shortcutsVersion")
+        }
+        acceptAllKey = acceptAll
+        acceptWordKey = acceptWord
         dismissKey = Self.load("dismissKey", defaults) ?? .escape
         toggleShortcut = Self.load("toggleShortcut", defaults)
         typoCorrection = defaults.bool(forKey: "typoCorrection")
@@ -66,6 +76,7 @@ final class Preferences: ObservableObject {
         ghostColor = GhostColor(rawValue: defaults.string(forKey: "ghostColor") ?? "") ?? .automatic
         ghostOpacity = defaults.double(forKey: "ghostOpacity")
         showKeyHint = defaults.bool(forKey: "showKeyHint")
+        wordIncludesPunctuation = defaults.bool(forKey: "wordIncludesPunctuation")
         appOverrides = defaults.dictionary(forKey: "appOverrides") as? [String: Bool] ?? [:]
         disabledSites = defaults.stringArray(forKey: "disabledSites") ?? []
         aboutMe = defaults.string(forKey: "aboutMe") ?? ""

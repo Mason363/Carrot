@@ -15,10 +15,30 @@ enum TestBench {
     /// an event tap and without ever inserting text (for testing inside real apps).
     static let observedBundleID: String? = {
         let args = CommandLine.arguments
-        guard let i = args.firstIndex(of: "--observe"), i + 1 < args.count else { return nil }
-        return args[i + 1]
+        if let i = args.firstIndex(of: "--observe"), i + 1 < args.count { return args[i + 1] }
+        if observedPID != nil { return "pid" }
+        return nil
     }()
-    static var isDebugging: Bool { isActive || observedBundleID != nil }
+    /// `--observe-pid <pid>`: observe one process (e.g. a second Foreword running `--testbench --bench-only`).
+    static let observedPID: pid_t? = {
+        let args = CommandLine.arguments
+        guard let i = args.firstIndex(of: "--observe-pid"), i + 1 < args.count else { return nil }
+        return pid_t(args[i + 1])
+    }()
+    /// `--bench-only`: host the test fields without running suggestions (another instance observes them).
+    static let benchOnly = CommandLine.arguments.contains("--bench-only")
+
+    static func observedApplication() -> NSRunningApplication? {
+        if let pid = observedPID { return NSRunningApplication(processIdentifier: pid) }
+        return observedBundleID.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0).first }
+    }
+    /// `--live-test`: normal operation (real key tap, real focus) plus the debug command channel,
+    /// without saving memory, stats or per-app adjustments.
+    static let isLiveTest = CommandLine.arguments.contains("--live-test")
+    /// Any test mode: never persist the user's data, log requests.
+    static var isDebugging: Bool { isActive || observedBundleID != nil || isLiveTest }
+    /// Modes that must never touch global keyboard input.
+    static var disablesGlobalInput: Bool { isActive || observedBundleID != nil }
     /// Where insertions go while testing (instead of synthesised global key events).
     @MainActor static var insertHandler: ((String) -> Void)?
     @MainActor static var backspaceHandler: ((Int) -> Void)?
@@ -48,7 +68,8 @@ final class TestBenchController: NSObject, WKNavigationDelegate {
         panel.level = .floating
         panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
-        if let screen = NSScreen.main {
+        // Always the primary display, same place, so measurements are repeatable.
+        if let screen = NSScreen.screens.first {
             panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.maxX - 660, y: screen.visibleFrame.minY + 20))
         }
         let content = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
@@ -104,6 +125,11 @@ final class TestBenchController: NSObject, WKNavigationDelegate {
     @objc private func command(_ note: Notification) {
         guard let json = note.object as? String, let data = json.data(using: .utf8),
               let cmd = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        // With two instances (bench + observer), each command names its recipient.
+        if let to = cmd["to"] as? String {
+            let role = TestBench.isActive ? "bench" : "observer"
+            guard to == role else { return }
+        }
         let out = cmd["out"] as? String
         Task { @MainActor in
             await self.run(cmd)
@@ -121,11 +147,20 @@ final class TestBenchController: NSObject, WKNavigationDelegate {
             let text = cmd["text"] as? String ?? ""
             let delay = cmd["delay"] as? Double ?? 0.06
             for ch in text {
-                SuggestionController.shared.debugNoteTyped(String(ch))
+                if !TestBench.benchOnly { SuggestionController.shared.debugNoteTyped(String(ch)) }
                 insert(String(ch))
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1e9))
             }
             try? await Task.sleep(nanoseconds: UInt64((cmd["settle"] as? Double ?? 0.4) * 1e9))
+        case "target":
+            SuggestionController.shared.debugRetarget(identifier: cmd["identifier"] as? String ?? "")
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        case "suggest":
+            SuggestionController.shared.debugSuggestNow()
+            try? await Task.sleep(nanoseconds: UInt64((cmd["settle"] as? Double ?? 1.0) * 1e9))
+        case "noteTyped":
+            SuggestionController.shared.debugNoteKey(.text(cmd["text"] as? String ?? "x"))
+            try? await Task.sleep(nanoseconds: UInt64((cmd["settle"] as? Double ?? 0.6) * 1e9))
         case "accept":
             SuggestionController.shared.debugAccept(all: cmd["all"] as? Bool ?? true)
             try? await Task.sleep(nanoseconds: 400_000_000)
@@ -209,9 +244,10 @@ final class TestBenchController: NSObject, WKNavigationDelegate {
     }
 
     private func writeState(to path: String) {
-        var state = SuggestionController.shared.debugState
+        var state: [String: Any] = TestBench.benchOnly ? [:] : SuggestionController.shared.debugState
         state["benchFrame"] = window.map { NSStringFromRect($0.frame) } ?? ""
-        state["overlayFrame"] = SuggestionController.shared.debugOverlayFrame
+        if !TestBench.benchOnly { state["overlayFrame"] = SuggestionController.shared.debugOverlayFrame }
+        state["pid"] = Int(ProcessInfo.processInfo.processIdentifier)
         state["download"] = downloadReport
         state["screenHeight"] = NSScreen.screens.first?.frame.height ?? 0
         state["benchField"] = current
@@ -233,8 +269,8 @@ final class TestBenchController: NSObject, WKNavigationDelegate {
             _ = try? await webView.evaluateJavaScript("document.getElementById('\(id)').focus(); true")
         }
         try? await Task.sleep(nanoseconds: 200_000_000)
-        SuggestionController.shared.debugRetarget(identifier: benchIdentifier)
-        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        if !TestBench.benchOnly { SuggestionController.shared.debugRetarget(identifier: benchIdentifier) }
+        try? await Task.sleep(nanoseconds: TestBench.benchOnly ? 300_000_000 : 1_200_000_000)
     }
 
     private func setText(_ text: String, caret: Int?) async {
@@ -258,7 +294,7 @@ final class TestBenchController: NSObject, WKNavigationDelegate {
             _ = try? await webView.evaluateJavaScript(js)
         }
         try? await Task.sleep(nanoseconds: 150_000_000)
-        SuggestionController.shared.debugRetarget(identifier: benchIdentifier)
+        if !TestBench.benchOnly { SuggestionController.shared.debugRetarget(identifier: benchIdentifier) }
     }
 
     private func insert(_ text: String) {

@@ -55,6 +55,9 @@ final class SuggestionController: ObservableObject {
         var kind: Kind
         var version: UInt64
         var typedSinceShown = 0
+        /// Fully accepted: the ghost stays on screen (under the text being inserted) until the app
+        /// has drawn the inserted text, so there is never a frame with neither.
+        var acceptedAt: TimeInterval?
         var isCorrection: Bool { if case .correction = kind { return true } else { return false } }
     }
 
@@ -75,8 +78,8 @@ final class SuggestionController: ObservableObject {
             tracker.onEvent = { [weak self] event in self?.handleTracker(event) }
             tracker.start()
         }
-        if !TestBench.isDebugging {
-            // Test modes never touch global input.
+        if !TestBench.disablesGlobalInput {
+            // The test bench and observe mode never touch global input.
             tap.handler = { [weak self] type, event in
                 self?.handleTapEvent(type: type, event: event) ?? false
             }
@@ -229,9 +232,7 @@ final class SuggestionController: ObservableObject {
 
     private func checkFocus() {
         guard !focusCheckInFlight, !TestBench.isActive else { return }
-        let observedPID = TestBench.observedBundleID.flatMap {
-            NSRunningApplication.runningApplications(withBundleIdentifier: $0).first?.processIdentifier
-        }
+        let observedPID = TestBench.observedApplication()?.processIdentifier
         // Never send Accessibility queries to ourselves from a background thread (they run in-process).
         if observedPID == nil,
            NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier {
@@ -247,6 +248,7 @@ final class SuggestionController: ObservableObject {
         AXQueue.queue.async { [weak self] in
             var element = observedPID.map(FieldReader.focusedElement(inApp:)) ?? FieldReader.focusedElement()
             if element?.pid == ownPID { element = nil }
+            _ = ownPID
             var info: FieldInfo?
             var changed = false
             if element != current {
@@ -268,6 +270,7 @@ final class SuggestionController: ObservableObject {
         commitMemory()
         hide()
         field = info
+        if TestBench.observedBundleID != nil { TextInserter.observedTarget = info?.element }
         lastSnapshot = nil
         geometry = nil
         fieldStartText = nil
@@ -277,18 +280,27 @@ final class SuggestionController: ObservableObject {
         currentFieldEligible = fieldEligible
         assembler.reset()
         guard let info, fieldEligible else { return }
-        // First read: remember the starting text (for memory) and warm the model's cache.
+        readInitialSnapshot(info, attempt: 0)
+    }
+
+    /// First read: remember the starting text (for memory) and warm the model's cache. Apps that
+    /// were just activated sometimes answer late, so retry a few times.
+    private func readInitialSnapshot(_ info: FieldInfo, attempt: Int) {
         AXQueue.queue.async { [weak self] in
             let snapshot = FieldReader.snapshot(of: info)
             DispatchQueue.main.async {
                 guard let self, self.field == info else { return }
                 if let snapshot {
-                    self.fieldStartText = snapshot.prefix + snapshot.suffix
-                    self.lastSnapshot = snapshot
+                    if self.lastSnapshot == nil { self.lastSnapshot = snapshot }
+                    if self.fieldStartText == nil { self.fieldStartText = snapshot.prefix + snapshot.suffix }
                     self.rememberGeometry(snapshot)
+                } else if attempt < 3 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.readInitialSnapshot(info, attempt: attempt + 1) }
                 }
-                self.assembler.prepare(for: info, snapshot: snapshot)
-                self.prefillCurrent()
+                if attempt == 0 || snapshot != nil {
+                    self.assembler.prepare(for: info, snapshot: snapshot)
+                    self.prefillCurrent()
+                }
             }
         }
     }
@@ -312,6 +324,7 @@ final class SuggestionController: ObservableObject {
     private func isEligible(_ info: FieldInfo) -> Bool {
         guard prefs.isActive, models.engine != nil else { return false }
         if info.pid == ProcessInfo.processInfo.processIdentifier && !TestBench.isActive { return false }
+        if TestBench.observedPID != nil { return prefs.isActive && models.engine != nil && !info.isSecure }
         guard prefs.isAppEnabled(info.bundleID) else { return false }
         if info.isSecure || info.isSearch { return false }
         if IsSecureEventInputEnabled() { return false }
@@ -361,6 +374,7 @@ final class SuggestionController: ObservableObject {
         if snapshot.fontName != nil || snapshot.fontSize != nil {
             if geometry == nil || ProcessInfo.processInfo.systemUptime - (geometry?.queriedAt ?? 0) >= 2 {
                 geometry = .init(fontName: snapshot.fontName, fontSize: snapshot.fontSize, textColor: snapshot.textColor,
+                                 sampleText: snapshot.sampleText, sampleWidth: snapshot.sampleWidth,
                                  queriedAt: ProcessInfo.processInfo.systemUptime)
             }
         }
@@ -414,13 +428,25 @@ final class SuggestionController: ObservableObject {
                 hide()
             } else {
                 if Self.sameText(snapshot.prefix, active.anchorPrefix) {
-                    presenter.reposition(snapshot: snapshot)
-                    return
+                    if active.acceptedAt != nil || active.remaining.trimmingCharacters(in: .whitespaces).isEmpty {
+                        // The accepted text is on screen now: let the ghost go and continue below.
+                        presenter.hide()
+                        self.active = nil
+                    } else {
+                        // The app has drawn what the user typed (or accepted): re-lay out the rest exactly.
+                        if let shown = presenter.reposition(snapshot: snapshot, text: active.remaining), shown != active.remaining {
+                            var updated = active
+                            updated.remaining = shown
+                            updated.version = tapState.publish(visible: true, remaining: shown, isCorrection: false)
+                            self.active = updated
+                        }
+                        return
+                    }
                 }
                 // A lagging read: the app hasn't applied keys we already accounted for (type-through / accept).
                 let recent = ProcessInfo.processInfo.systemUptime - lastKeyTime < 0.5
                 let lag = active.anchorPrefix.count - snapshot.prefix.count
-                if recent, lag > 0, lag <= active.typedSinceShown,
+                if recent || active.acceptedAt != nil, lag > 0, lag <= active.typedSinceShown,
                    Self.sameText(snapshot.prefix, String(active.anchorPrefix.dropLast(lag))) {
                     return
                 }
@@ -428,9 +454,13 @@ final class SuggestionController: ObservableObject {
             }
         }
 
-        guard let previous else { return }
-        let change = classify(from: previous, to: snapshot)
         let sinceKey = ProcessInfo.processInfo.systemUptime - lastKeyTime
+        guard let previous else {
+            // No baseline yet (the first read failed): still answer a fresh keystroke.
+            if case .text = lastKey, sinceKey < 1.0 { request(for: snapshot) }
+            return
+        }
+        let change = classify(from: previous, to: snapshot)
         switch change {
         case .unchanged:
             return
@@ -453,11 +483,13 @@ final class SuggestionController: ObservableObject {
             request(for: snapshot)
         case .appended(let added):
             // Only react to the user's own typing (or an acceptance), not to remote edits or pastes.
-            let userTyped: Bool
+            var userTyped: Bool
             switch lastKey {
             case .text, .accept, .newline: userTyped = sinceKey < 1.5
             default: userTyped = false
             }
+            // Observe mode: the observed app is driven by a test tool, not by key presses.
+            if TestBench.observedBundleID != nil { userTyped = true }
             guard userTyped else { return }
             if suppressUntilBoundary {
                 if added.contains(where: { $0.isWhitespace || $0.isPunctuation }) {
@@ -535,13 +567,13 @@ final class SuggestionController: ObservableObject {
         current.remaining.removeFirst(min(typed.count, current.remaining.count))
         current.anchorPrefix += typed
         current.typedSinceShown += typed.count
-        if current.remaining.trimmingCharacters(in: .whitespaces).isEmpty {
-            // The user typed the whole suggestion themselves: a good prediction, but nothing written for them.
-            hide()
-            return
-        }
         active = current
-        presenter.advance(by: typed, remaining: current.remaining)
+        // Inline ghosts stay put until the app has drawn the typed character on top of its gray
+        // twin (the next snapshot re-lays them out); moving early would leave a one-frame gap.
+        if !presenter.isInline {
+            if current.remaining.trimmingCharacters(in: .whitespaces).isEmpty { hide(); return }
+            presenter.advance(by: typed, remaining: current.remaining)
+        }
     }
 
     private func accept(all: Bool) {
@@ -550,7 +582,9 @@ final class SuggestionController: ObservableObject {
             applyCorrection(correction)
             return
         }
-        let text = all ? current.remaining : Self.nextWord(of: current.remaining)
+        let text = all ? current.remaining
+            : Self.nextWord(of: current.remaining, after: current.anchorPrefix.last,
+                            includePunctuation: Preferences.shared.wordIncludesPunctuation)
         guard !text.isEmpty else { hide(); return }
         TextInserter.type(text)
         noteAccepted(characters: text.count, explicit: true)
@@ -558,21 +592,79 @@ final class SuggestionController: ObservableObject {
         current.anchorPrefix += text
         current.typedSinceShown += text.count
         if current.remaining.trimmingCharacters(in: .whitespaces).isEmpty {
-            hide()
+            // Keep the ghost under the text being inserted until the app has drawn it.
+            current.acceptedAt = ProcessInfo.processInfo.systemUptime
+            current.version = tapState.publish(visible: false, remaining: "", isCorrection: false)
+            active = current
+            let version = current.version
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                // Safety net if the app never reports the change.
+                guard let self, let pending = self.active, pending.version == version, pending.acceptedAt != nil else { return }
+                self.hide()
+            }
         } else {
             current.version = tapState.publish(visible: true, remaining: current.remaining, isCorrection: false)
             active = current
-            presenter.advance(by: text, remaining: current.remaining)
+            if !presenter.isInline { presenter.advance(by: text, remaining: current.remaining) }
         }
     }
 
-    /// The next word of a suggestion, with its leading space and trailing punctuation.
-    static func nextWord(of text: String) -> String {
-        var result = ""
-        var index = text.startIndex
-        while index < text.endIndex, text[index].isWhitespace { result.append(text[index]); index = text.index(after: index) }
-        while index < text.endIndex, !text[index].isWhitespace { result.append(text[index]); index = text.index(after: index) }
-        return result
+    /// The next word of a suggestion, with its leading space. Punctuation right after the word (a
+    /// comma, a period, a closing quote) stays for the next press unless `includePunctuation`; when
+    /// the suggestion continues with punctuation, that punctuation is the next piece on its own.
+    /// `previous` is the character just before the suggestion (it can make an apostrophe part of a word).
+    static func nextWord(of text: String, after previous: Character? = nil, includePunctuation: Bool = false) -> String {
+        let chars = Array(text)
+        var i = 0
+        while i < chars.count, chars[i].isWhitespace, !chars[i].isNewline { i += 1 }
+        let lead = i
+        guard i < chars.count else { return text }
+        if chars[i].isNewline { return String(chars[0...i]) }
+        if includePunctuation {
+            while i < chars.count, !chars[i].isWhitespace { i += 1 }
+            return String(chars[0..<i])
+        }
+        func isWordish(_ c: Character) -> Bool { c.isLetter || c.isNumber || c == "_" }
+        func isCJK(_ c: Character) -> Bool { c.unicodeScalars.first.map(TextAnalysis.isCJK) ?? false }
+        func isWordCharacter(_ index: Int) -> Bool {
+            let c = chars[index]
+            if isWordish(c) { return true }
+            let before: Character? = index > 0 ? chars[index - 1] : (index == lead ? previous : nil)
+            let after: Character? = index + 1 < chars.count ? chars[index + 1] : nil
+            guard let before, let after else { return false }
+            switch c {
+            case "'", "’", "-", "‐": return isWordish(before) && isWordish(after)          // don't, well-known
+            case ".": return (before.isNumber && after.isNumber) || (before.isLetter && after.isLetter) // 3.5, e.g
+            case ",", ":": return before.isNumber && after.isNumber                          // 1,000, 10:30
+            default: return false
+            }
+        }
+        // Opening quotes, brackets and symbols lead into the word they belong to.
+        let opening: Set<Character> = ["\"", "'", "“", "‘", "(", "[", "{", "«", "¿", "¡", "$", "€", "£", "¥", "#", "@"]
+        while i < chars.count, opening.contains(chars[i]) { i += 1 }
+        let wordStart = i
+        if i < chars.count, isCJK(chars[i]) {
+            // No spaces between CJK words: take one word as the system segments it.
+            let rest = String(chars[i...])
+            let tokenizer = CFStringTokenizerCreate(nil, rest as CFString, CFRange(location: 0, length: (rest as NSString).length),
+                                                    kCFStringTokenizerUnitWord, nil)
+            if CFStringTokenizerAdvanceToNextToken(tokenizer) != [] {
+                let range = CFStringTokenizerGetCurrentTokenRange(tokenizer)
+                let word = (rest as NSString).substring(with: NSRange(location: range.location, length: max(1, range.length)))
+                i += word.count
+            } else {
+                i += 1
+            }
+        } else {
+            while i < chars.count, isWordCharacter(i), !isCJK(chars[i]) { i += 1 }
+        }
+        if i == wordStart {
+            // No word: the punctuation run itself, up to the next space or word.
+            i = lead
+            while i < chars.count, !chars[i].isWhitespace, !isWordish(chars[i]) { i += 1 }
+            if i == lead { i = lead + 1 }
+        }
+        return String(chars[0..<i])
     }
 
     private func dismiss() {
@@ -698,6 +790,7 @@ final class SuggestionController: ObservableObject {
             "caret": lastSnapshot?.caret.map { "\($0)" } ?? "nil",
             "font": "\(lastSnapshot?.fontName ?? "nil") \(lastSnapshot?.fontSize ?? 0)",
             // Never echo the user's clipboard into debug output.
+            "layout": presenter.debugLayout,
             "header": assembler.header.replacingOccurrences(
                 of: "Recently copied:\n\"\"\"\n[\\s\\S]*?\n\"\"\"", with: "Recently copied: [redacted]", options: .regularExpression),
             "clipboardAccess": "\(ClipboardMonitor.shared.access)",
@@ -708,8 +801,8 @@ final class SuggestionController: ObservableObject {
 
     /// Test bench: point Foreword at the bench's selected field.
     func debugRetarget(identifier: String, attempt: Int = 0) {
-        guard TestBench.isActive else { return }
-        let pid = ProcessInfo.processInfo.processIdentifier
+        guard TestBench.isActive || TestBench.observedPID != nil else { return }
+        let pid = TestBench.observedPID ?? ProcessInfo.processInfo.processIdentifier
         AXQueue.queue.async { [weak self] in
             let app = AXElement.application(pid: pid)
             app.setTimeout(1)
@@ -739,6 +832,26 @@ final class SuggestionController: ObservableObject {
                 self?.setField(info)
             }
         }
+    }
+
+    /// Test modes: read the field and request a suggestion for the current caret, whatever changed.
+    func debugSuggestNow() {
+        guard let field, fieldEligible else { return }
+        AXQueue.queue.async { [weak self] in
+            let snapshot = FieldReader.snapshot(of: field)
+            DispatchQueue.main.async {
+                guard let self, let snapshot else { return }
+                self.rememberGeometry(snapshot)
+                self.lastSnapshot = snapshot
+                self.hide()
+                self.request(for: snapshot)
+            }
+        }
+    }
+
+    /// Live test: report key activity for text typed by tools that bypass the OS event stream.
+    func debugNoteKey(_ kind: KeyKind) {
+        noteKeyActivity(kind)
     }
 
     /// Test bench: simulate a key outcome without a real key press.

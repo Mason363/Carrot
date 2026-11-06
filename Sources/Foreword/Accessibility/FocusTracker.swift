@@ -55,11 +55,12 @@ final class FocusTracker {
 
     private func attach(to app: NSRunningApplication?) {
         var app = app
-        if let observed = TestBench.observedBundleID {
-            app = NSRunningApplication.runningApplications(withBundleIdentifier: observed).first
+        if TestBench.observedBundleID != nil {
+            app = TestBench.observedApplication()
         }
         frontmostApp = app
-        guard let app, app.processIdentifier != ProcessInfo.processInfo.processIdentifier || TestBench.isActive else {
+        guard let app, app.processIdentifier != ProcessInfo.processInfo.processIdentifier || TestBench.isActive
+                || TestBench.observedPID != nil else {
             detach()
             onEvent?(.focusChanged)
             return
@@ -122,7 +123,9 @@ enum WebAccessibility {
         let bundleID = app.bundleIdentifier
         let isChromium = AppRules.isChromium(bundleID) || isElectron(app)
         let isGecko = bundleID.map { $0.hasPrefix("org.mozilla.") || $0.contains("zen-browser") || $0.hasPrefix("net.waterfox") || $0.hasPrefix("org.torproject") } ?? false
-        guard isChromium || isGecko else { return }
+        // iWork builds its document text tree only for assistive clients.
+        let isIWork = bundleID.map { $0.hasPrefix("com.apple.iWork.") } ?? false
+        guard isChromium || isGecko || isIWork else { return }
         enabledPIDs.insert(pid)
         AXQueue.queue.async {
             let element = AXElement.application(pid: pid)
