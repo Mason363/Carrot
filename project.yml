@@ -51,6 +51,8 @@ targets:
       configs:
         Release:
           OTHER_CODE_SIGN_FLAGS: "--timestamp"
+          # Notarization rejects the debugging entitlement Xcode injects into plain builds.
+          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
     postBuildScripts:
       - name: Thin embedded frameworks
         script: "\"${SRCROOT}/scripts/thin-frameworks.sh\""

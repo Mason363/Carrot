@@ -21,8 +21,16 @@ DIST="dist"
 DMG="$DIST/Foreword-$VERSION.dmg"
 
 notarize() {
-  xcrun notarytool submit "$1" --apple-id "$APPLE_ID" --team-id "$TEAM_ID" \
-    --password "$APP_SPECIFIC_PASSWORD" --wait --timeout 30m
+  local result notary_status submission
+  result=$(xcrun notarytool submit "$1" --apple-id "$APPLE_ID" --team-id "$TEAM_ID" \
+    --password "$APP_SPECIFIC_PASSWORD" --wait --timeout 30m --output-format json)
+  notary_status=$(print -r -- "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))')
+  submission=$(print -r -- "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
+  echo "    notarization $submission: $notary_status"
+  if [[ "$notary_status" != "Accepted" ]]; then
+    xcrun notarytool log "$submission" --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_SPECIFIC_PASSWORD"
+    exit 1
+  fi
 }
 
 echo "==> Building Foreword $VERSION"

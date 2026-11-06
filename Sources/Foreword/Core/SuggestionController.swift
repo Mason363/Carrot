@@ -81,7 +81,11 @@ final class SuggestionController: ObservableObject {
                 self?.handleTapEvent(type: type, event: event) ?? false
             }
             tapAvailable = tap.start()
-            if !tapAvailable { log.error("Event tap unavailable") }
+            if !tapAvailable {
+                // Right after Accessibility is granted macOS can refuse the tap for a moment.
+                log.error("Event tap unavailable; retrying")
+                retryTap(attempt: 1)
+            }
         }
         syncKeys()
 
@@ -101,6 +105,15 @@ final class SuggestionController: ObservableObject {
             .sink { [weak self] _ in self?.commitMemory() }
             .store(in: &cancellables)
         loadStats()
+    }
+
+    private func retryTap(attempt: Int) {
+        guard attempt <= 60, isRunning, !tapAvailable else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, self.isRunning else { return }
+            self.tapAvailable = self.tap.start()
+            if !self.tapAvailable { self.retryTap(attempt: attempt + 1) }
+        }
     }
 
     func stop() {

@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import SwiftUI
 
 /// The menu bar menu.
@@ -51,6 +52,12 @@ struct MenuContent: View {
             NSApp.activate(ignoringOtherApps: true)
             NSApp.orderFrontStandardAboutPanel(nil)
         }
+        Button("Check for Updates…") {
+            // Opens the releases page; Foreword itself never phones home.
+            if let url = URL(string: "https://github.com/Mason363/Foreword/releases/latest") {
+                NSWorkspace.shared.open(url)
+            }
+        }
 
         Divider()
 
@@ -69,6 +76,7 @@ struct MenuContent: View {
         case .ready: break
         }
         if !prefs.isEnabled { return "Suggestions are off" }
+        if IsSecureEventInputEnabled() { return "Paused while a password field is active" }
         if let until = prefs.pausedUntil, until > Date() {
             return "Paused until \(until.formatted(date: .omitted, time: .shortened))"
         }
