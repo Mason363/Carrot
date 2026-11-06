@@ -1,0 +1,14 @@
+# Build output
+build/
+DerivedData/
+ForewordKit/.build/
+ForewordKit/.swiftpm/
+*.xcodeproj/
+*.xcworkspace/
+dist/
+
+# Local reference checkouts
+Vendor/
+
+# macOS
+.DS_Store

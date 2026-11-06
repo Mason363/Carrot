@@ -1,0 +1,753 @@
+import AppKit
+import Carbon.HIToolbox
+import Combine
+import ForewordEngine
+import os
+
+/// The conductor: follows focus, reads the field, asks the engine, shows the ghost, and handles
+/// type-through, acceptance, dismissal and corrections.
+@MainActor
+final class SuggestionController: ObservableObject {
+    static let shared = SuggestionController()
+
+    // MARK: Collaborators
+    private let prefs = Preferences.shared
+    private let models = ModelManager.shared
+    private let tracker = FocusTracker()
+    private let tap = KeyEventTap()
+    private let tapState = TapState()
+    private let presenter = GhostPresenter()
+    private let assembler = ContextAssembler()
+    private let typo = TypoCorrector()
+    private let log = Logger(subsystem: "io.github.mason363.Foreword", category: "controller")
+    private var cancellables = Set<AnyCancellable>()
+
+    // MARK: Published status
+    @Published private(set) var isRunning = false
+    @Published private(set) var tapAvailable = true
+    @Published private(set) var currentAppName: String?
+    @Published private(set) var currentFieldEligible = false
+    @Published private(set) var stats = Stats()
+
+    struct Stats: Codable {
+        var shown = 0
+        var accepted = 0
+        var charactersAccepted = 0
+    }
+
+    // MARK: Field state
+    private var field: FieldInfo?
+    private var fieldEligible = false
+    private var lastSnapshot: FieldSnapshot?
+    private var geometry: FieldReader.CachedGeometry?
+    private var fieldStartText: String?
+    private var focusCheckInFlight = false
+    private var snapshotInFlight = false
+    private var snapshotDirty = false
+
+    // MARK: Suggestion state
+    private struct Active {
+        enum Kind { case continuation, insertion, correction(TypoCorrector.Correction) }
+        var remaining: String
+        /// The text before the caret at which `remaining` applies.
+        var anchorPrefix: String
+        var kind: Kind
+        var version: UInt64
+        var typedSinceShown = 0
+        var isCorrection: Bool { if case .correction = kind { return true } else { return false } }
+    }
+
+    private var active: Active?
+    private var requestSerial = 0
+    private var lastKey: KeyKind = .other
+    private var lastKeyTime: TimeInterval = 0
+    private var suppressUntilBoundary = false
+    private var appBias: [String: Double] = UserDefaults.standard.dictionary(forKey: "appBias") as? [String: Double] ?? [:]
+
+    // MARK: Lifecycle
+
+    func start() {
+        guard !isRunning else { return }
+        isRunning = true
+        assembler.onUpdate = { [weak self] in self?.prefillCurrent() }
+        if !TestBench.isActive {
+            tracker.onEvent = { [weak self] event in self?.handleTracker(event) }
+            tracker.start()
+        }
+        if !TestBench.isDebugging {
+            // Test modes never touch global input.
+            tap.handler = { [weak self] type, event in
+                self?.handleTapEvent(type: type, event: event) ?? false
+            }
+            tapAvailable = tap.start()
+            if !tapAvailable { log.error("Event tap unavailable") }
+        }
+        syncKeys()
+
+        prefs.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.syncKeys()
+                    self?.reevaluateField()
+                }
+            }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: .forewordEngineReady)
+            .sink { [weak self] _ in self?.reevaluateField() }
+            .store(in: &cancellables)
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didDeactivateApplicationNotification)
+            .sink { [weak self] _ in self?.commitMemory() }
+            .store(in: &cancellables)
+        loadStats()
+    }
+
+    func stop() {
+        commitMemory()
+        tracker.stop()
+        tap.stop()
+        hide()
+        isRunning = false
+        cancellables.removeAll()
+    }
+
+    private func syncKeys() {
+        tapState.setKeys(acceptAll: prefs.acceptAllKey, acceptWord: prefs.acceptWordKey,
+                         dismiss: prefs.dismissKey, toggle: prefs.toggleShortcut)
+    }
+
+    // MARK: Event tap (tap thread)
+
+    nonisolated private func handleTapEvent(type: CGEventType, event: CGEvent) -> Bool {
+        switch type {
+        case .keyDown:
+            let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+            var length = 0
+            var buffer = [UniChar](repeating: 0, count: 8)
+            event.keyboardGetUnicodeString(maxStringLength: 8, actualStringLength: &length, unicodeString: &buffer)
+            let characters = length > 0 ? String(utf16CodeUnits: buffer, count: length) : ""
+            let decision = tapState.decide(keyCode: keyCode, flags: event.flags, characters: characters)
+            DispatchQueue.main.async { [weak self] in
+                self?.handleKey(outcome: decision.outcome, kind: decision.kind, version: decision.version)
+            }
+            return decision.consume
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            let state = tapState.hideFromTap()
+            DispatchQueue.main.async { [weak self] in self?.handleMouse(wasVisible: state.wasVisible) }
+            return false
+        case .scrollWheel:
+            if tapState.isVisible {
+                let state = tapState.hideFromTap()
+                DispatchQueue.main.async { [weak self] in self?.handleScroll(wasVisible: state.wasVisible) }
+            }
+            return false
+        default:
+            return false
+        }
+    }
+
+    // MARK: Key handling (main)
+
+    private func handleKey(outcome: TapOutcome, kind: KeyKind, version: UInt64) {
+        switch outcome {
+        case .toggle:
+            prefs.isEnabled.toggle()
+            if !prefs.isEnabled { hide() }
+            return
+        case .none:
+            break
+        case .acceptAll, .acceptWord, .dismiss, .typedThrough, .diverged:
+            // A decision made against an older suggestion: resync and hide to be safe.
+            guard let current = active, current.version == version else {
+                if outcome != .diverged { hide() }
+                break
+            }
+            switch outcome {
+            case .acceptAll: accept(all: true)
+            case .acceptWord: accept(all: false)
+            case .dismiss: dismiss()
+            case .typedThrough(let typed): typeThrough(typed)
+            case .diverged: hide()
+            default: break
+            }
+        }
+        noteKeyActivity(kind)
+    }
+
+    private func noteKeyActivity(_ kind: KeyKind) {
+        lastKey = kind
+        lastKeyTime = ProcessInfo.processInfo.systemUptime
+        switch kind {
+        case .text, .delete, .newline, .accept, .shortcut:
+            // The app applies the key asynchronously; read soon, then again in case it was slow.
+            for delay in [0.006, 0.04, 0.14, 0.35] { scheduleSnapshot(after: delay) }
+        case .navigation, .tab:
+            hide()
+            scheduleSnapshot(after: 0.03)
+        default:
+            break
+        }
+    }
+
+    private func handleMouse(wasVisible: Bool) {
+        if wasVisible { hide() }
+        lastKey = .mouse
+        lastKeyTime = ProcessInfo.processInfo.systemUptime
+        scheduleSnapshot(after: 0.05)
+    }
+
+    private func handleScroll(wasVisible: Bool) {
+        if wasVisible { hide() }
+    }
+
+    // MARK: Focus
+
+    private func handleTracker(_ event: FocusTracker.Event) {
+        switch event {
+        case .focusChanged:
+            checkFocus()
+        case .valueChanged, .selectionChanged:
+            scheduleSnapshot(after: 0)
+        case .geometryChanged:
+            if active != nil { scheduleSnapshot(after: 0.02) }
+        }
+    }
+
+    private func checkFocus() {
+        guard !focusCheckInFlight, !TestBench.isActive else { return }
+        let observedPID = TestBench.observedBundleID.flatMap {
+            NSRunningApplication.runningApplications(withBundleIdentifier: $0).first?.processIdentifier
+        }
+        // Never send Accessibility queries to ourselves from a background thread (they run in-process).
+        if observedPID == nil,
+           NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+            if field != nil { setField(nil) }
+            return
+        }
+        focusCheckInFlight = true
+        let current = field?.element
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        AXQueue.queue.async { [weak self] in
+            var element = observedPID.map(FieldReader.focusedElement(inApp:)) ?? FieldReader.focusedElement()
+            if element?.pid == ownPID { element = nil }
+            var info: FieldInfo?
+            var changed = false
+            if element != current {
+                changed = true
+                info = element.flatMap(FieldReader.info(for:))
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.focusCheckInFlight = false
+                if changed { self.setField(info) }
+            }
+        }
+    }
+
+    private func setField(_ info: FieldInfo?) {
+        commitMemory()
+        hide()
+        field = info
+        lastSnapshot = nil
+        geometry = nil
+        fieldStartText = nil
+        suppressUntilBoundary = false
+        currentAppName = info?.appName ?? NSWorkspace.shared.frontmostApplication?.localizedName
+        fieldEligible = info.map(isEligible) ?? false
+        currentFieldEligible = fieldEligible
+        assembler.reset()
+        guard let info, fieldEligible else { return }
+        // First read: remember the starting text (for memory) and warm the model's cache.
+        AXQueue.queue.async { [weak self] in
+            let snapshot = FieldReader.snapshot(of: info)
+            DispatchQueue.main.async {
+                guard let self, self.field == info else { return }
+                if let snapshot {
+                    self.fieldStartText = snapshot.prefix + snapshot.suffix
+                    self.lastSnapshot = snapshot
+                    self.rememberGeometry(snapshot)
+                }
+                self.assembler.prepare(for: info, snapshot: snapshot)
+                self.prefillCurrent()
+            }
+        }
+    }
+
+    /// Re-checks eligibility after a settings change or once the model is ready.
+    private func reevaluateField() {
+        guard let field else { return }
+        let eligible = isEligible(field)
+        if eligible != fieldEligible {
+            fieldEligible = eligible
+            currentFieldEligible = eligible
+            if eligible {
+                assembler.prepare(for: field, snapshot: lastSnapshot)
+                prefillCurrent()
+            } else {
+                hide()
+            }
+        }
+    }
+
+    private func isEligible(_ info: FieldInfo) -> Bool {
+        guard prefs.isActive, models.engine != nil else { return false }
+        if info.pid == ProcessInfo.processInfo.processIdentifier && !TestBench.isActive { return false }
+        guard prefs.isAppEnabled(info.bundleID) else { return false }
+        if info.isSecure || info.isSearch { return false }
+        if IsSecureEventInputEnabled() { return false }
+        if AppRules.isQuietURL(info.url) || prefs.isSiteDisabled(info.domain) { return false }
+        if info.isSingleLine && AppRules.isDataField(label: info.label) { return false }
+        // Browser chrome (address bar, find bar…) is outside any web page.
+        if AppRules.isBrowser(info.bundleID) && !info.isWebContent { return false }
+        return true
+    }
+
+    private func prefillCurrent() {
+        guard fieldEligible, let engine = models.engine, let snapshot = lastSnapshot else { return }
+        engine.prefill(context: assembler.header, prefix: snapshot.prefix)
+    }
+
+    // MARK: Snapshots
+
+    private func scheduleSnapshot(after delay: TimeInterval) {
+        guard field != nil, fieldEligible else { return }
+        if delay <= 0 {
+            readSnapshot()
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.readSnapshot() }
+        }
+    }
+
+    private func readSnapshot() {
+        guard let field, fieldEligible else { return }
+        if snapshotInFlight { snapshotDirty = true; return }
+        snapshotInFlight = true
+        let cached = geometry
+        AXQueue.queue.async { [weak self] in
+            let snapshot = FieldReader.snapshot(of: field, cached: cached)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.snapshotInFlight = false
+                if let snapshot, self.field == snapshot.info { self.process(snapshot) }
+                if self.snapshotDirty {
+                    self.snapshotDirty = false
+                    self.readSnapshot()
+                }
+            }
+        }
+    }
+
+    private func rememberGeometry(_ snapshot: FieldSnapshot) {
+        if snapshot.fontName != nil || snapshot.fontSize != nil {
+            if geometry == nil || ProcessInfo.processInfo.systemUptime - (geometry?.queriedAt ?? 0) >= 2 {
+                geometry = .init(fontName: snapshot.fontName, fontSize: snapshot.fontSize, textColor: snapshot.textColor,
+                                 queriedAt: ProcessInfo.processInfo.systemUptime)
+            }
+        }
+    }
+
+    private enum Change {
+        case unchanged
+        case appended(String)
+        case deleted
+        case cleared
+        case other
+    }
+
+    private func classify(from old: FieldSnapshot, to new: FieldSnapshot) -> Change {
+        if new.prefix == old.prefix && new.selection.location == old.selection.location { return .unchanged }
+        if new.prefix.isEmpty && new.suffix.isEmpty && !(old.prefix.isEmpty && old.suffix.isEmpty) { return .cleared }
+        if new.prefix.count > old.prefix.count, new.prefix.hasPrefix(old.prefix) {
+            return .appended(String(new.prefix.dropFirst(old.prefix.count)))
+        }
+        // A bounded prefix window may have slid: compare tails.
+        if old.prefix.count >= FieldReader.prefixLimit - 50, new.selection.location > old.selection.location {
+            let grown = new.selection.location - old.selection.location
+            if grown < 200 {
+                let added = String(new.prefix.suffix(grown))
+                if String(new.prefix.dropLast(grown)).hasSuffix(String(old.prefix.suffix(200))) { return .appended(added) }
+            }
+        }
+        if old.prefix.hasPrefix(new.prefix) { return .deleted }
+        return .other
+    }
+
+    private func process(_ snapshot: FieldSnapshot) {
+        rememberGeometry(snapshot)
+        let previous = lastSnapshot
+        lastSnapshot = snapshot
+        if fieldStartText == nil { fieldStartText = snapshot.prefix + snapshot.suffix }
+
+        if snapshot.hasSelection {
+            hide()
+            return
+        }
+        if IsSecureEventInputEnabled() {
+            hide()
+            return
+        }
+
+        // Keep a visible suggestion if the field is consistent with it.
+        if let active {
+            if case .correction(let c) = active.kind {
+                if Self.sameText(snapshot.prefix, c.prefix) { return }
+                hide()
+            } else {
+                if Self.sameText(snapshot.prefix, active.anchorPrefix) {
+                    presenter.reposition(snapshot: snapshot)
+                    return
+                }
+                // A lagging read: the app hasn't applied keys we already accounted for (type-through / accept).
+                let recent = ProcessInfo.processInfo.systemUptime - lastKeyTime < 0.5
+                let lag = active.anchorPrefix.count - snapshot.prefix.count
+                if recent, lag > 0, lag <= active.typedSinceShown,
+                   Self.sameText(snapshot.prefix, String(active.anchorPrefix.dropLast(lag))) {
+                    return
+                }
+                hide()
+            }
+        }
+
+        guard let previous else { return }
+        let change = classify(from: previous, to: snapshot)
+        let sinceKey = ProcessInfo.processInfo.systemUptime - lastKeyTime
+        switch change {
+        case .unchanged:
+            return
+        case .cleared:
+            // A message was sent: remember it and re-read the conversation.
+            commitMemory(final: previous.prefix + previous.suffix)
+            fieldStartText = ""
+            assembler.refreshScreen(snapshot: snapshot)
+        case .deleted:
+            return
+        case .other:
+            // The app rewrote what was just typed (autocorrect, smart quotes, auto-capitalisation):
+            // still the user's typing. Anything else (undo, paste, clicks) gets no suggestion.
+            let typedRecently: Bool
+            switch lastKey {
+            case .text, .accept: typedRecently = sinceKey < 0.8
+            default: typedRecently = false
+            }
+            guard typedRecently, !suppressUntilBoundary else { return }
+            request(for: snapshot)
+        case .appended(let added):
+            // Only react to the user's own typing (or an acceptance), not to remote edits or pastes.
+            let userTyped: Bool
+            switch lastKey {
+            case .text, .accept, .newline: userTyped = sinceKey < 1.5
+            default: userTyped = false
+            }
+            guard userTyped else { return }
+            if suppressUntilBoundary {
+                if added.contains(where: { $0.isWhitespace || $0.isPunctuation }) {
+                    suppressUntilBoundary = false
+                } else {
+                    return
+                }
+            }
+            if InputMethod.isComposing(added: added) { return }
+            if prefs.typoCorrection, lastKey != .accept, let last = added.last, last == " " || ",.;:!?".contains(last) {
+                checkTypo(snapshot)
+            }
+            request(for: snapshot)
+        }
+    }
+
+    /// Text equality that tolerates the bounded prefix window having moved.
+    static func sameText(_ a: String, _ b: String) -> Bool {
+        if a.count < 900 || b.count < 900 { return a == b }
+        return a.suffix(800) == b.suffix(800)
+    }
+
+    // MARK: Requests
+
+    private func shouldRequest(_ snapshot: FieldSnapshot) -> Bool {
+        let trimmed = snapshot.prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if snapshot.info.isSingleLine && trimmed.count < 3 { return false }
+        // Inside a word with letters right after the caret: never.
+        if let next = snapshot.suffix.first, next.isLetter || next.isNumber,
+           let previous = snapshot.prefix.last, previous.isLetter || previous.isNumber { return false }
+        return true
+    }
+
+    private func request(for snapshot: FieldSnapshot) {
+        guard fieldEligible, let engine = models.engine, shouldRequest(snapshot) else { return }
+        assembler.refreshClipboard(fieldText: snapshot.prefix + snapshot.suffix)
+        requestSerial += 1
+        let serial = requestSerial
+        var options = prefs.completionOptions
+        let bias = snapshot.info.bundleID.flatMap { appBias[$0] } ?? 0
+        options.applyEagerness(prefs.eagerness + bias)
+        options.length = prefs.length
+        options.allowMidLine = prefs.midLineSuggestions
+        let request = CompletionRequest(context: assembler.header, prefix: snapshot.prefix, suffix: snapshot.suffix, options: options)
+        Task { [weak self] in
+            let result = await engine.complete(request)
+            if TestBench.isDebugging {
+                let line = "request …\(request.prefix.suffix(40).debugDescription) → \(result.map { "\($0.text.debugDescription) p=\(String(format: "%.2f", $0.probability)) \(Int($0.milliseconds))ms" } ?? "nil")\n"
+                FileHandle.standardError.write(line.data(using: .utf8)!)
+            }
+            guard let self, serial == self.requestSerial, let result else { return }
+            guard let current = self.lastSnapshot, current.info == snapshot.info, current.prefix == snapshot.prefix,
+                  !current.hasSelection, self.active?.isCorrection != true else { return }
+            self.models.recordLatency(result.milliseconds)
+            self.present(result, snapshot: current)
+        }
+    }
+
+    private func present(_ completion: Completion, snapshot: FieldSnapshot) {
+        let lineSuffix = snapshot.lineSuffix.trimmingCharacters(in: .whitespaces)
+        let preferPill = completion.kind == .insertion || !lineSuffix.isEmpty
+        guard let shown = presenter.show(completion.text, snapshot: snapshot, preferPill: preferPill),
+              !shown.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        let version = tapState.publish(visible: true, remaining: shown, isCorrection: false)
+        active = Active(remaining: shown, anchorPrefix: snapshot.prefix,
+                        kind: completion.kind == .insertion ? .insertion : .continuation, version: version)
+        stats.shown += 1
+    }
+
+    // MARK: Type-through, accept, dismiss
+
+    private func typeThrough(_ typed: String) {
+        guard var current = active else { return }
+        current.remaining.removeFirst(min(typed.count, current.remaining.count))
+        current.anchorPrefix += typed
+        current.typedSinceShown += typed.count
+        if current.remaining.trimmingCharacters(in: .whitespaces).isEmpty {
+            noteAccepted(characters: current.typedSinceShown, explicit: false)
+            hide()
+            return
+        }
+        active = current
+        presenter.advance(by: typed, remaining: current.remaining)
+    }
+
+    private func accept(all: Bool) {
+        guard var current = active else { return }
+        if case .correction(let correction) = current.kind {
+            applyCorrection(correction)
+            return
+        }
+        let text = all ? current.remaining : Self.nextWord(of: current.remaining)
+        guard !text.isEmpty else { hide(); return }
+        TextInserter.type(text)
+        noteAccepted(characters: text.count, explicit: true)
+        current.remaining.removeFirst(text.count)
+        current.anchorPrefix += text
+        current.typedSinceShown += text.count
+        if current.remaining.trimmingCharacters(in: .whitespaces).isEmpty {
+            hide()
+        } else {
+            current.version = tapState.publish(visible: true, remaining: current.remaining, isCorrection: false)
+            active = current
+            presenter.advance(by: text, remaining: current.remaining)
+        }
+    }
+
+    /// The next word of a suggestion, with its leading space and trailing punctuation.
+    static func nextWord(of text: String) -> String {
+        var result = ""
+        var index = text.startIndex
+        while index < text.endIndex, text[index].isWhitespace { result.append(text[index]); index = text.index(after: index) }
+        while index < text.endIndex, !text[index].isWhitespace { result.append(text[index]); index = text.index(after: index) }
+        return result
+    }
+
+    private func dismiss() {
+        if case .correction(let c) = active?.kind { typo.ignore(c.original) }
+        if let bundle = field?.bundleID, !TestBench.isDebugging {
+            appBias[bundle] = max(-0.2, (appBias[bundle] ?? 0) - 0.02)
+            UserDefaults.standard.set(appBias, forKey: "appBias")
+        }
+        hide()
+        suppressUntilBoundary = true
+    }
+
+    private func hide() {
+        if active != nil || presenter.isVisible {
+            presenter.hide()
+        }
+        active = nil
+        tapState.publish(visible: false, remaining: "", isCorrection: false)
+    }
+
+    private func noteAccepted(characters: Int, explicit: Bool) {
+        stats.accepted += 1
+        stats.charactersAccepted += characters
+        if let bundle = field?.bundleID, explicit, !TestBench.isDebugging {
+            appBias[bundle] = min(0.15, (appBias[bundle] ?? 0) + 0.01)
+            UserDefaults.standard.set(appBias, forKey: "appBias")
+        }
+        saveStats()
+    }
+
+    // MARK: Typos
+
+    private func checkTypo(_ snapshot: FieldSnapshot) {
+        let engine = models.engine
+        let header = assembler.header
+        Task { [weak self] in
+            guard let self, let correction = await self.typo.correction(for: snapshot, engine: engine, header: header) else { return }
+            guard let current = self.lastSnapshot, current.prefix == correction.prefix, current.info == snapshot.info else { return }
+            let info = snapshot.info
+            let length = (correction.original as NSString).length
+            AXQueue.queue.async {
+                let rect = info.element.bounds(for: CFRange(location: correction.wordStart, length: length))
+                DispatchQueue.main.async {
+                    guard let current = self.lastSnapshot, current.prefix == correction.prefix else { return }
+                    self.showCorrection(correction, snapshot: current, wordRect: rect)
+                }
+            }
+        }
+    }
+
+    private func showCorrection(_ correction: TypoCorrector.Correction, snapshot: FieldSnapshot, wordRect: CGRect?) {
+        presenter.hide()
+        var anchor = wordRect
+        if let rect = wordRect, rect.height < 4 { anchor = nil }
+        guard presenter.show(correction.replacement, snapshot: snapshot, preferPill: true,
+                             correction: correction.original, correctionRect: anchor ?? snapshot.caret) != nil else { return }
+        let version = tapState.publish(visible: true, remaining: "", isCorrection: true)
+        active = Active(remaining: "", anchorPrefix: snapshot.prefix, kind: .correction(correction), version: version)
+    }
+
+    private func applyCorrection(_ correction: TypoCorrector.Correction) {
+        hide()
+        let deleteCount = correction.original.count + correction.trailing.count
+        TextInserter.backspace(count: deleteCount)
+        TextInserter.type(correction.replacement + correction.trailing)
+        lastKey = .accept
+        lastKeyTime = ProcessInfo.processInfo.systemUptime
+        suppressUntilBoundary = false
+        for delay in [0.02, 0.08, 0.2] { scheduleSnapshot(after: delay) }
+    }
+
+    // MARK: Memory
+
+    private func commitMemory(final explicitText: String? = nil) {
+        guard prefs.memoryEnabled, !TestBench.isDebugging, let field, fieldEligible, !field.isSecure else { return }
+        let start = fieldStartText ?? ""
+        let end = explicitText ?? lastSnapshot.map { $0.prefix + $0.suffix } ?? ""
+        let added = Self.addedText(from: start, to: end)
+        if added.count >= 40 {
+            MemoryStore.shared.remember(added, app: field.appName, title: field.windowTitle)
+        }
+        fieldStartText = end
+    }
+
+    /// The text inserted between `start` and `end` (longest common prefix/suffix removed).
+    static func addedText(from start: String, to end: String) -> String {
+        let a = Array(start), b = Array(end)
+        var p = 0
+        while p < a.count, p < b.count, a[p] == b[p] { p += 1 }
+        var s = 0
+        while s < a.count - p, s < b.count - p, a[a.count - 1 - s] == b[b.count - 1 - s] { s += 1 }
+        guard b.count - s > p else { return "" }
+        return String(b[p..<(b.count - s)]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: Stats
+
+    private func loadStats() {
+        if let data = UserDefaults.standard.data(forKey: "stats"), let s = try? JSONDecoder().decode(Stats.self, from: data) {
+            stats = s
+        }
+    }
+
+    private func saveStats() {
+        guard !TestBench.isDebugging else { return }
+        if let data = try? JSONEncoder().encode(stats) { UserDefaults.standard.set(data, forKey: "stats") }
+    }
+
+    func resetStats() {
+        stats = Stats()
+        saveStats()
+    }
+
+    // MARK: Test hooks
+
+    var debugState: [String: Any] {
+        [
+            "field": field.map { "\($0.appName ?? "?") \($0.role ?? "?") eligible=\(fieldEligible)" } ?? "none",
+            "prefix": String(lastSnapshot?.prefix.suffix(80) ?? ""),
+            "suggestion": active?.remaining ?? "",
+            "visible": presenter.isVisible,
+            "style": presenter.content.map { "\($0.style)" } ?? "",
+            "caret": lastSnapshot?.caret.map { "\($0)" } ?? "nil",
+            "font": "\(lastSnapshot?.fontName ?? "nil") \(lastSnapshot?.fontSize ?? 0)",
+            // Never echo the user's clipboard into debug output.
+            "header": assembler.header.replacingOccurrences(
+                of: "Recently copied:\n\"\"\"\n[\\s\\S]*?\n\"\"\"", with: "Recently copied: [redacted]", options: .regularExpression),
+            "clipboardAccess": "\(ClipboardMonitor.shared.access)",
+        ]
+    }
+
+    var debugOverlayFrame: String { presenter.isVisible ? NSStringFromRect(presenter.debugFrame) : "" }
+
+    /// Test bench: point Foreword at the bench's selected field.
+    func debugRetarget(identifier: String, attempt: Int = 0) {
+        guard TestBench.isActive else { return }
+        let pid = ProcessInfo.processInfo.processIdentifier
+        AXQueue.queue.async { [weak self] in
+            let app = AXElement.application(pid: pid)
+            app.setTimeout(1)
+            var queue: [AXElement] = app.elements(kAXWindowsAttribute)
+            var found: AXElement?
+            var visited = 0
+            let focused = app.element(kAXFocusedUIElementAttribute)
+            while !queue.isEmpty, visited < 4000 {
+                let element = queue.removeFirst()
+                visited += 1
+                let elementID = element.string(kAXIdentifierAttribute) ?? element.string("AXDOMIdentifier") ?? ""
+                if elementID == identifier, element.raw(kAXSelectedTextRangeAttribute) != nil {
+                    found = element
+                    break
+                }
+                queue.append(contentsOf: element.children)
+            }
+            let info = (found ?? focused).flatMap(FieldReader.info(for:))
+            DispatchQueue.main.async {
+                if info == nil, attempt < 10 {
+                    // WebKit builds its accessibility tree lazily; try again shortly.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        self?.debugRetarget(identifier: identifier, attempt: attempt + 1)
+                    }
+                    return
+                }
+                self?.setField(info)
+            }
+        }
+    }
+
+    /// Test bench: simulate a key outcome without a real key press.
+    func debugAccept(all: Bool) {
+        guard active != nil else { return }
+        accept(all: all)
+        noteKeyActivity(.accept)
+    }
+
+    func debugNoteTyped(_ text: String) {
+        if let current = active, current.remaining.hasPrefix(text), !current.isCorrection {
+            let version = tapState.publish(visible: true, remaining: String(current.remaining.dropFirst(text.count)), isCorrection: false)
+            active?.version = version
+            typeThrough(text)
+        } else if active != nil {
+            hide()
+        }
+        noteKeyActivity(.text(text))
+    }
+}
+
+/// Detects input-method composition (e.g. Pinyin), during which the field holds provisional text.
+enum InputMethod {
+    static func isComposing(added: String) -> Bool {
+        guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
+              let typePointer = TISGetInputSourceProperty(source, kTISPropertyInputSourceType) else { return false }
+        let type = Unmanaged<CFString>.fromOpaque(typePointer).takeUnretainedValue() as String
+        guard type == (kTISTypeKeyboardInputMode as String) else { return false }
+        // While composing, the field shows Latin letters (the reading); committed text is CJK.
+        return added.unicodeScalars.allSatisfy { $0.isASCII && ($0.properties.isAlphabetic || $0 == "'") }
+    }
+}
