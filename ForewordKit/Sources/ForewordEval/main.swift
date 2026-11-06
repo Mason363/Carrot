@@ -79,7 +79,12 @@ case "sim":
     var totalChars = 0, keystrokes = 0, shown = 0, correct = 0, wrong = 0, savedChars = 0, full = 0, wrongChars = 0
     var latencies: [Double] = []
     for doc in simDocuments {
-        let header = PromptBuilder.header(for: doc.context)
+        let header: String
+        switch flag("--header") {
+        case "none": header = ""
+        case "alt": header = altHeader(doc.context)
+        default: header = PromptBuilder.header(for: doc.context)
+        }
         let chars = Array(doc.text)
         totalChars += chars.count
         var i = 0
@@ -173,6 +178,18 @@ case "bench":
 
 default:
     print("unknown command \(command)")
+}
+
+/// Experimental lighter header: reads like the top of a document rather than a form.
+func altHeader(_ c: WritingContext) -> String {
+    var parts: [String] = []
+    if let about = c.aboutUser { parts.append("(About me: \(about))") }
+    let place = [c.appName, c.website, c.windowTitle].compactMap { $0 }.joined(separator: " — ")
+    if !place.isEmpty { parts.append("[\(place)]") }
+    if let screen = c.screenText { parts.append(screen) }
+    if let copied = c.clipboard { parts.append("(Copied: \(copied))") }
+    guard !parts.isEmpty else { return "" }
+    return parts.joined(separator: "\n\n") + "\n\n---\n\n"
 }
 
 /// How much of `suggestion` a user would accept given what they actually typed next, and how many

@@ -20,7 +20,7 @@ It runs a small language model on your Mac's GPU. There's no account, no subscri
 - **Fixes typos.** When the word you just typed looks misspelled, Foreword offers the correction that fits the sentence.
 - **Knows when to stay quiet.** It only suggests what it's reasonably sure of, never in password fields, and stays out of terminals, code editors and password managers unless you turn it on.
 - **Placement that looks native.** Suggestions use the font, size and color of the text you're writing and sit on its baseline. Where inline text wouldn't make sense — in the middle of a line, or where the caret position is uncertain — they appear in a small card instead.
-- **Fast.** Typically 25–60 ms per suggestion on Apple silicon. The model keeps its work between keystrokes, so each key press only processes what changed.
+- **Fast.** About 25 ms per suggestion (40 ms at the 90th percentile) on an M5 Pro with the default model; older chips take longer. The model keeps its work between keystrokes, so each key press only processes what changed.
 
 ## Requirements
 
@@ -51,13 +51,33 @@ All keys can be changed in **Settings › Keyboard**. They're only taken over wh
 
 Foreword uses *base* language models — models trained to continue text, not to chat — which is what makes suggestions sound like you instead of like an assistant.
 
-| Option | Model | Size | Notes |
-| --- | --- | --- | --- |
-| Fast | Qwen3.5 0.8B (Q8_0) | 830 MB | For 8 GB Macs |
-| Balanced | Qwen3.5 2B (Q4_K_M) | 1.3 GB | Default |
-| Best | Qwen3.5 4B (Q4_K_M) | 2.7 GB | 16 GB or more |
+| Option | Model | Size | Keystrokes saved* | Typical latency* |
+| --- | --- | --- | --- | --- |
+| Fast | Qwen3.5 0.8B (Q8_0) | 830 MB | 42% | 21 ms |
+| Balanced (default) | Qwen3.5 2B (Q4_K_M) | 1.3 GB | 46% | 24 ms |
+| Best | Qwen3.5 4B (Q4_K_M) | 2.7 GB | 50% | 61 ms |
+
+\* Keystroke simulation with default settings on an M5 Pro; see "Measured quality" below.
 
 Models are downloaded from Hugging Face on first run and checked against a SHA-256 hash. You can also choose your own GGUF base model in **Settings › Model**.
+
+## Measured quality
+
+From `foreword-eval sim`, which types sixteen pieces of everyday writing (emails, chats, essays, notes, a review, a recipe…) one key at a time and accepts a suggestion whenever it matches what comes next, with the default model and settings:
+
+| | Fewer | Default | More |
+| --- | --- | --- | --- |
+| Keystrokes saved | 42% | 46% | 49% |
+| Suggestions whose first word is right | 83% | 78% | 68% |
+| Suggestions that are right in full | 80% | 71% | 56% |
+
+The "How often" slider in Settings moves between these points.
+
+## Known limitations
+
+- Foreword needs the app to report where the text cursor is. Apps that draw their own text without exposing it to macOS (some canvas-based editors, games, remote desktops) don't get inline suggestions; where only the field is known, a floating card is used instead.
+- Input methods that compose text (Pinyin, Kana…) pause suggestions while composing.
+- Text you copied is used only if macOS lets Foreword read the clipboard without asking (Settings › Personal explains how to allow it).
 
 ## Privacy
 
