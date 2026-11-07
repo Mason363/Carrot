@@ -121,6 +121,10 @@ enum WebAccessibility {
         let pid = app.processIdentifier
         guard !enabledPIDs.contains(pid) else { return }
         let bundleID = app.bundleIdentifier
+        // The switch changes how the app behaves for its whole life (Electron editors turn on their
+        // screen-reader mode), so only flip it where Foreword is actually going to work.
+        let prefs = Preferences.shared
+        guard prefs.isActive, prefs.isAppEnabled(bundleID) || TestBench.isDebugging else { return }
         let isChromium = AppRules.isChromium(bundleID) || isElectron(app)
         let isGecko = bundleID.map { $0.hasPrefix("org.mozilla.") || $0.contains("zen-browser") || $0.hasPrefix("net.waterfox") || $0.hasPrefix("org.torproject") } ?? false
         // iWork builds its document text tree only for assistive clients.

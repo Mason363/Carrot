@@ -40,7 +40,9 @@ final class SuggestionController: ObservableObject {
     private var fieldEligible = false
     private var lastSnapshot: FieldSnapshot?
     private var geometry: FieldReader.CachedGeometry?
-    private var fieldStartText: String?
+    /// What the user has written in the current field since the last memory commit: the keys they
+    /// typed and the suggestions they accepted, never text that was already there or pasted.
+    private var writtenText = ""
     private var focusCheckInFlight = false
     private var lastFocusedElement: AXElement?
     private var snapshotInFlight = false
@@ -66,6 +68,10 @@ final class SuggestionController: ObservableObject {
     private var lastKey: KeyKind = .other
     private var lastKeyTime: TimeInterval = 0
     private var suppressUntilBoundary = false
+    /// Counts handled keys and clicks: anything computed before the latest one is stale.
+    private var keySequence = 0
+    /// The newest request whose answer (or cancellation) has come back.
+    private var finishedSerial = 0
     private var appBias: [String: Double] = UserDefaults.standard.dictionary(forKey: "appBias") as? [String: Double] ?? [:]
 
     // MARK: Lifecycle
@@ -97,6 +103,9 @@ final class SuggestionController: ObservableObject {
             .sink { [weak self] _ in
                 DispatchQueue.main.async {
                     self?.syncKeys()
+                    // Turned on (or allowed in this app) while it's in front: its web content needs
+                    // the accessibility switch now rather than at its next activation.
+                    if let app = NSWorkspace.shared.frontmostApplication { WebAccessibility.enableIfNeeded(for: app) }
                     self?.reevaluateField()
                 }
             }
@@ -166,6 +175,15 @@ final class SuggestionController: ObservableObject {
     // MARK: Key handling (main)
 
     private func handleKey(outcome: TapOutcome, kind: KeyKind, version: UInt64) {
+        keySequence += 1
+        // A key decided against an older suggestion than the one showing now: whatever it did, the
+        // newer one no longer matches what's on screen.
+        if outcome != .toggle, let current = active, current.version != version {
+            hide()
+            noteWriting(kind)
+            noteKeyActivity(kind)
+            return
+        }
         switch outcome {
         case .toggle:
             prefs.isEnabled.toggle()
@@ -188,6 +206,7 @@ final class SuggestionController: ObservableObject {
             default: break
             }
         }
+        noteWriting(kind)
         noteKeyActivity(kind)
     }
 
@@ -207,7 +226,9 @@ final class SuggestionController: ObservableObject {
     }
 
     private func handleMouse(wasVisible: Bool) {
+        keySequence += 1
         if wasVisible { hide() }
+        noteWriting(.mouse)
         lastKey = .mouse
         lastKeyTime = ProcessInfo.processInfo.systemUptime
         scheduleSnapshot(after: 0.05)
@@ -251,15 +272,19 @@ final class SuggestionController: ObservableObject {
             _ = ownPID
             var info: FieldInfo?
             var changed = false
+            var definite = true
             if element != current {
                 changed = true
                 info = element.flatMap(FieldReader.info(for:))
+                // Nil can mean "not a text field" or "the app didn't answer in time"; only the first
+                // is worth remembering, or a slow app would never get suggestions in this field.
+                if info == nil, let element { definite = element.role != nil }
             }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.focusCheckInFlight = false
                 if changed {
-                    self.lastFocusedElement = element
+                    self.lastFocusedElement = definite ? element : nil
                     if info != self.field || info == nil { self.setField(info) }
                 }
             }
@@ -273,7 +298,7 @@ final class SuggestionController: ObservableObject {
         if TestBench.observedBundleID != nil { TextInserter.observedTarget = info?.element }
         lastSnapshot = nil
         geometry = nil
-        fieldStartText = nil
+        writtenText = ""
         suppressUntilBoundary = false
         currentAppName = info?.appName ?? NSWorkspace.shared.frontmostApplication?.localizedName
         fieldEligible = info.map(isEligible) ?? false
@@ -292,7 +317,6 @@ final class SuggestionController: ObservableObject {
                 guard let self, self.field == info else { return }
                 if let snapshot {
                     if self.lastSnapshot == nil { self.lastSnapshot = snapshot }
-                    if self.fieldStartText == nil { self.fieldStartText = snapshot.prefix + snapshot.suffix }
                     self.rememberGeometry(snapshot)
                 } else if attempt < 3 {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.readInitialSnapshot(info, attempt: attempt + 1) }
@@ -310,8 +334,10 @@ final class SuggestionController: ObservableObject {
         guard let field else { return }
         let eligible = isEligible(field)
         if eligible != fieldEligible {
+            if !eligible { commitMemory() } // what was written before the pause
             fieldEligible = eligible
             currentFieldEligible = eligible
+            writtenText = ""
             if eligible {
                 assembler.prepare(for: field, snapshot: lastSnapshot)
                 prefillCurrent()
@@ -336,6 +362,8 @@ final class SuggestionController: ObservableObject {
     }
 
     private func prefillCurrent() {
+        // Warming the cache would cancel a request in flight, and nothing would ask again.
+        guard finishedSerial >= requestSerial else { return }
         guard fieldEligible, let engine = models.engine, let snapshot = lastSnapshot else { return }
         engine.prefill(context: assembler.header, prefix: snapshot.prefix)
     }
@@ -410,7 +438,6 @@ final class SuggestionController: ObservableObject {
         rememberGeometry(snapshot)
         let previous = lastSnapshot
         lastSnapshot = snapshot
-        if fieldStartText == nil { fieldStartText = snapshot.prefix + snapshot.suffix }
 
         if snapshot.hasSelection {
             hide()
@@ -466,8 +493,7 @@ final class SuggestionController: ObservableObject {
             return
         case .cleared:
             // A message was sent: remember it and re-read the conversation.
-            commitMemory(final: previous.prefix + previous.suffix)
-            fieldStartText = ""
+            commitMemory()
             assembler.refreshScreen(snapshot: snapshot)
         case .deleted:
             return
@@ -529,6 +555,7 @@ final class SuggestionController: ObservableObject {
         assembler.refreshClipboard(fieldText: snapshot.prefix + snapshot.suffix)
         requestSerial += 1
         let serial = requestSerial
+        let keysAtRequest = keySequence
         var options = prefs.completionOptions
         let bias = snapshot.info.bundleID.flatMap { appBias[$0] } ?? 0
         options.applyEagerness(prefs.eagerness + bias)
@@ -541,7 +568,11 @@ final class SuggestionController: ObservableObject {
                 let line = "request …\(request.prefix.suffix(40).debugDescription) → \(result.map { "\($0.text.debugDescription) p=\(String(format: "%.2f", $0.probability)) \(Int($0.milliseconds))ms" } ?? "nil")\n"
                 FileHandle.standardError.write(line.data(using: .utf8)!)
             }
-            guard let self, serial == self.requestSerial, let result else { return }
+            guard let self else { return }
+            self.finishedSerial = max(self.finishedSerial, serial)
+            guard serial == self.requestSerial, let result else { return }
+            // Turned off meanwhile, or the user kept typing before the app showed it.
+            guard self.fieldEligible, self.prefs.isActive, self.keySequence == keysAtRequest else { return }
             guard let current = self.lastSnapshot, current.info == snapshot.info, current.prefix == snapshot.prefix,
                   !current.hasSelection, self.active?.isCorrection != true else { return }
             self.models.recordLatency(result.milliseconds)
@@ -587,6 +618,7 @@ final class SuggestionController: ObservableObject {
                             includePunctuation: Preferences.shared.wordIncludesPunctuation)
         guard !text.isEmpty else { hide(); return }
         TextInserter.type(text)
+        noteWriting(.text(text))
         noteAccepted(characters: text.count, explicit: true)
         current.remaining.removeFirst(text.count)
         current.anchorPrefix += text
@@ -700,15 +732,18 @@ final class SuggestionController: ObservableObject {
     private func checkTypo(_ snapshot: FieldSnapshot) {
         let engine = models.engine
         let header = assembler.header
+        let keysAtCheck = keySequence
         Task { [weak self] in
             guard let self, let correction = await self.typo.correction(for: snapshot, engine: engine, header: header) else { return }
-            guard let current = self.lastSnapshot, current.prefix == correction.prefix, current.info == snapshot.info else { return }
+            guard self.fieldEligible, self.prefs.isActive, self.keySequence == keysAtCheck,
+                  let current = self.lastSnapshot, current.prefix == correction.prefix, current.info == snapshot.info else { return }
             let info = snapshot.info
             let length = (correction.original as NSString).length
             AXQueue.queue.async {
                 let rect = info.element.bounds(for: CFRange(location: correction.wordStart, length: length))
                 DispatchQueue.main.async {
-                    guard let current = self.lastSnapshot, current.prefix == correction.prefix else { return }
+                    guard self.fieldEligible, self.prefs.isActive, self.keySequence == keysAtCheck,
+                          let current = self.lastSnapshot, current.prefix == correction.prefix else { return }
                     self.showCorrection(correction, snapshot: current, wordRect: rect)
                 }
             }
@@ -727,6 +762,8 @@ final class SuggestionController: ObservableObject {
 
     private func applyCorrection(_ correction: TypoCorrector.Correction) {
         hide()
+        // Backspaces are blind: only send them if the text still ends with the word being fixed.
+        guard let current = lastSnapshot, current.prefix.hasSuffix(correction.original + correction.trailing) else { return }
         let deleteCount = correction.original.count + correction.trailing.count
         TextInserter.backspace(count: deleteCount)
         TextInserter.type(correction.replacement + correction.trailing)
@@ -738,26 +775,41 @@ final class SuggestionController: ObservableObject {
 
     // MARK: Memory
 
-    private func commitMemory(final explicitText: String? = nil) {
-        guard prefs.memoryEnabled, !TestBench.isDebugging, let field, fieldEligible, !field.isSecure else { return }
-        let start = fieldStartText ?? ""
-        let end = explicitText ?? lastSnapshot.map { $0.prefix + $0.suffix } ?? ""
-        let added = Self.addedText(from: start, to: end)
-        if added.count >= 40 {
-            MemoryStore.shared.remember(added, app: field.appName, title: field.windowTitle)
+    /// After Forget All: drop what's pending and what the current prompt already recalled.
+    func forgetMemories() {
+        writtenText = ""
+        if let field, fieldEligible {
+            assembler.reset()
+            assembler.prepare(for: field, snapshot: lastSnapshot)
         }
-        fieldStartText = end
     }
 
-    /// The text inserted between `start` and `end` (longest common prefix/suffix removed).
-    static func addedText(from start: String, to end: String) -> String {
-        let a = Array(start), b = Array(end)
-        var p = 0
-        while p < a.count, p < b.count, a[p] == b[p] { p += 1 }
-        var s = 0
-        while s < a.count - p, s < b.count - p, a[a.count - 1 - s] == b[b.count - 1 - s] { s += 1 }
-        guard b.count - s > p else { return "" }
-        return String(b[p..<(b.count - s)]).trimmingCharacters(in: .whitespacesAndNewlines)
+    private func commitMemory() {
+        defer { writtenText = "" }
+        guard prefs.memoryEnabled, !TestBench.isDebugging, let field, fieldEligible, !field.isSecure else { return }
+        let written = writtenText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if written.count >= 40 {
+            MemoryStore.shared.remember(written, app: field.appName, title: field.windowTitle)
+        }
+    }
+
+    /// Keeps `writtenText` in step with what the user writes. Only keys typed while suggestions are on
+    /// for this field count; moving the cursor elsewhere starts a new passage.
+    private func noteWriting(_ kind: KeyKind) {
+        guard field != nil, fieldEligible, prefs.isActive else { return }
+        switch kind {
+        case .text(let typed):
+            writtenText += typed
+        case .newline:
+            writtenText += "\n"
+        case .delete:
+            if !writtenText.isEmpty { writtenText.removeLast() }
+        case .navigation, .mouse, .shortcut:
+            if !writtenText.isEmpty, !writtenText.hasSuffix("\n") { writtenText += "\n" }
+        default:
+            break
+        }
+        if writtenText.count > 8000 { writtenText.removeFirst(writtenText.count - 8000) }
     }
 
     // MARK: Stats

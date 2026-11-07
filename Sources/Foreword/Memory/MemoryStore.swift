@@ -29,6 +29,7 @@ final class MemoryStore: @unchecked Sendable {
         // Owner-only permissions: this is the user's writing.
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         exec("PRAGMA journal_mode=WAL;")
+        exec("PRAGMA secure_delete=ON;") // deleted text is overwritten, not just unlinked
         exec("""
             CREATE VIRTUAL TABLE IF NOT EXISTS entries USING fts5(
                 text, app UNINDEXED, title UNINDEXED, created UNINDEXED, tokenize='unicode61 remove_diacritics 2'
@@ -118,10 +119,19 @@ final class MemoryStore: @unchecked Sendable {
         }
     }
 
+    /// Waits for pending writes (before the app exits).
+    func flush() {
+        queue.sync {}
+    }
+
+    /// Forgets everything, leaving no trace on disk: full-text deletes only add tombstones until the
+    /// index is merged, and the write-ahead log keeps old pages until it is checkpointed.
     func clear() {
         queue.sync {
             _ = exec("DELETE FROM entries")
+            _ = exec("INSERT INTO entries(entries) VALUES('optimize')")
             _ = exec("VACUUM")
+            _ = exec("PRAGMA wal_checkpoint(TRUNCATE)")
         }
     }
 

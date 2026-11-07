@@ -50,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
             SuggestionController.shared.stop()
+            MemoryStore.shared.flush()
             UserDefaults.standard.synchronize()
         }
         // ggml's Metal backend asserts if its device is torn down while buffers are alive during
@@ -89,11 +90,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// Opens Settings from AppKit code (reopening the app, onboarding). SwiftUI no longer answers the
+/// old `showSettingsWindow:` action, but it still installs a "Settings…" item in the app menu, which
+/// opens its Settings scene when performed.
 @MainActor
 func openSettings() {
     NSApp.activate(ignoringOtherApps: true)
-    if #available(macOS 14, *) {
-        // SwiftUI's Settings scene responds to this selector.
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+    if let (menu, index) = settingsMenuItem(in: NSApp.mainMenu) {
+        menu.performActionForItem(at: index)
+    }
+    bringSettingsToFront()
+}
+
+@MainActor
+private func settingsMenuItem(in menu: NSMenu?) -> (NSMenu, Int)? {
+    guard let menu else { return nil }
+    for (index, item) in menu.items.enumerated() {
+        if item.keyEquivalent == "," && item.keyEquivalentModifierMask == .command { return (menu, index) }
+        if let found = settingsMenuItem(in: item.submenu) { return found }
+    }
+    return nil
+}
+
+/// A menu bar app isn't active when its menu is used, so Settings would open behind other windows.
+@MainActor
+func bringSettingsToFront() {
+    NSApp.activate(ignoringOtherApps: true)
+    DispatchQueue.main.async {
+        for window in NSApp.windows where window.identifier?.rawValue.contains("Settings") == true || window.title.hasSuffix("Settings") {
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+        }
     }
 }

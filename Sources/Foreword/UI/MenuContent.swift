@@ -46,7 +46,7 @@ struct MenuContent: View {
 
         Divider()
 
-        Button("Settings…") { openSettings() }
+        SettingsLink { Text("Settings…") }
             .keyboardShortcut(",")
         Button("About Foreword") {
             NSApp.activate(ignoringOtherApps: true)

@@ -8,7 +8,7 @@
 
 ---
 
-Foreword suggests the rest of your sentence as you type — in Mail, Messages, Slack, Notion, Google Docs, or any other text field — and shows it as gray text right where you're writing. Press <kbd>Tab</kbd> to take it, <kbd>⌥</kbd><kbd>→</kbd> to take one word, or just keep typing.
+Foreword suggests the rest of your sentence as you type — in Mail, Messages, Slack, Notion, Google Docs, or any other text field — and shows it as gray text right where you're writing. Press <kbd>Tab</kbd> to take it a word at a time, <kbd>⇧</kbd><kbd>Tab</kbd> to take all of it, or just keep typing.
 
 It runs a small language model on your Mac's GPU. There's no account, no subscription, no usage limit, and nothing you type is ever sent anywhere.
 
@@ -20,7 +20,7 @@ It runs a small language model on your Mac's GPU. There's no account, no subscri
 - **Fixes typos.** When the word you just typed looks misspelled, Foreword offers the correction that fits the sentence.
 - **Knows when to stay quiet.** It only suggests what it's reasonably sure of, never in password fields, and stays out of terminals, code editors and password managers unless you turn it on.
 - **Placement that looks native.** Suggestions use the font, size and color of the text you're writing and sit on its baseline. Where inline text wouldn't make sense — in the middle of a line, or where the caret position is uncertain — they appear in a small card instead.
-- **Fast.** About 25 ms per suggestion (40 ms at the 90th percentile) on an M5 Pro with the default model; older chips take longer. The model keeps its work between keystrokes, so each key press only processes what changed.
+- **Fast.** About 36 ms per suggestion (50 ms at the 90th percentile) on an M5 Pro with the default model; older chips take longer. The model keeps its work between keystrokes, so each key press only processes what changed.
 
 ## Requirements
 
@@ -38,12 +38,12 @@ It runs a small language model on your Mac's GPU. There's no account, no subscri
 
 | Key | Action |
 | --- | --- |
-| <kbd>Tab</kbd> | Accept the suggestion |
-| <kbd>⌥</kbd> <kbd>→</kbd> | Accept the next word |
+| <kbd>Tab</kbd> | Accept the next word |
+| <kbd>⇧</kbd> <kbd>Tab</kbd> | Accept the whole suggestion |
 | <kbd>Esc</kbd> | Dismiss |
 | Keep typing | The suggestion follows along as long as it matches |
 
-All keys can be changed in **Settings › Keyboard**. They're only taken over while a suggestion is showing.
+Punctuation after a word comes with the next press: "Monday." is accepted as "Monday", then ".". **Settings › Keyboard** can include it with the word instead, and all keys can be changed there. They're only taken over while a suggestion is showing.
 
 **Settings** (menu bar icon › Settings…) lets you choose how often suggestions appear and how long they get, pick colors, turn Foreword off for specific apps or websites, describe yourself for more personal suggestions, and switch models.
 
@@ -53,9 +53,9 @@ Foreword uses *base* language models — models trained to continue text, not to
 
 | Option | Model | Size | Keystrokes saved* | Typical latency* |
 | --- | --- | --- | --- | --- |
-| Fast | Qwen3.5 0.8B (Q8_0) | 830 MB | 42% | 21 ms |
-| Balanced (default) | Qwen3.5 2B (Q4_K_M) | 1.3 GB | 46% | 24 ms |
-| Best | Qwen3.5 4B (Q4_K_M) | 2.7 GB | 50% | 61 ms |
+| Fast | Qwen3.5 0.8B (Q8_0) | 830 MB | 49% | 27 ms |
+| Balanced (default) | Qwen3.5 2B (Q4_K_M) | 1.3 GB | 52% | 36 ms |
+| Best | Qwen3.5 4B (Q4_K_M) | 2.7 GB | 57% | 79 ms |
 
 \* Keystroke simulation with default settings on an M5 Pro; see "Measured quality" below.
 
@@ -67,9 +67,13 @@ From `foreword-eval sim`, which types sixteen pieces of everyday writing (emails
 
 | | Fewer | Default | More |
 | --- | --- | --- | --- |
-| Keystrokes saved | 42% | 46% | 49% |
-| Suggestions whose first word is right | 83% | 78% | 68% |
-| Suggestions that are right in full | 80% | 71% | 56% |
+| Keystrokes saved | 51% | 52% | 54% |
+| Suggestions whose first word is right | 77% | 72% | 61% |
+| Average suggestion length | 2.5 words | 2.8 words | 3.3 words |
+| Suggestions longer than one word | 64% | 74% | 82% |
+| Suggestions that are right word for word to the end | 34% | 26% | 14% |
+
+Suggestions aim for a few words at a time, so a suggestion is often useful for its first words even when its ending differs from what you meant: take what fits with <kbd>Tab</kbd>, word by word, and keep typing.
 
 The "How often" slider in Settings moves between these points.
 

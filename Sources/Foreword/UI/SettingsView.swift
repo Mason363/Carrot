@@ -20,6 +20,7 @@ struct SettingsView: View {
         }
         .frame(width: 560)
         .fixedSize(horizontal: false, vertical: true)
+        .onAppear { bringSettingsToFront() }
     }
 }
 
@@ -176,13 +177,20 @@ struct GhostPreview: View {
 
 struct KeyboardSettings: View {
     @ObservedObject private var prefs = Preferences.shared
+    private var toggle: [KeyCombo] { prefs.toggleShortcut.map { [$0] } ?? [] }
 
     var body: some View {
         Form {
             Section {
-                LabeledContent("Accept next word") { KeyRecorder(combo: $prefs.acceptWordKey) }
-                LabeledContent("Accept whole suggestion") { KeyRecorder(combo: $prefs.acceptAllKey) }
-                LabeledContent("Dismiss") { KeyRecorder(combo: $prefs.dismissKey) }
+                LabeledContent("Accept next word") {
+                    KeyRecorder(combo: $prefs.acceptWordKey, taken: [prefs.acceptAllKey, prefs.dismissKey] + toggle)
+                }
+                LabeledContent("Accept whole suggestion") {
+                    KeyRecorder(combo: $prefs.acceptAllKey, taken: [prefs.acceptWordKey, prefs.dismissKey] + toggle)
+                }
+                LabeledContent("Dismiss") {
+                    KeyRecorder(combo: $prefs.dismissKey, acceptsEscape: true, taken: [prefs.acceptWordKey, prefs.acceptAllKey] + toggle)
+                }
                 Toggle("Include punctuation when accepting a word", isOn: $prefs.wordIncludesPunctuation)
             } footer: {
                 Text("These keys are only taken over while a suggestion is showing; otherwise they work as usual. Without punctuation, a word is accepted on its own (“Thursday”), and the comma or period after it comes with the next press.")
@@ -193,7 +201,8 @@ struct KeyboardSettings: View {
                     HStack {
                         KeyRecorder(combo: Binding(get: { prefs.toggleShortcut ?? KeyCombo(keyCode: 0xFFFF) },
                                                    set: { prefs.toggleShortcut = $0 }),
-                                    allowsNone: true, isNone: prefs.toggleShortcut == nil)
+                                    allowsNone: true, isNone: prefs.toggleShortcut == nil, requiresModifier: true,
+                                    taken: [prefs.acceptWordKey, prefs.acceptAllKey, prefs.dismissKey])
                         if prefs.toggleShortcut != nil {
                             Button { prefs.toggleShortcut = nil } label: { Image(systemName: "xmark.circle.fill") }
                                 .buttonStyle(.borderless)
@@ -387,6 +396,7 @@ struct PersonalSettings: View {
         .confirmationDialog("Forget everything Foreword has learned from your writing?", isPresented: $confirmClear) {
             Button("Forget All", role: .destructive) {
                 MemoryStore.shared.clear()
+                SuggestionController.shared.forgetMemories()
                 memoryCount = 0
             }
         }

@@ -41,7 +41,11 @@ final class ModelManager: NSObject, ObservableObject {
     private var downloadSession: URLSession?
     private var downloadTask: URLSessionDownloadTask?
     private var downloadingSpec: ModelSpec?
-    private var resumeData: Data?
+    /// Where an interrupted download can pick up, and which model it belongs to.
+    private var resumeData: (specID: String, data: Data)?
+    /// Each load gets a number; a load that finishes after a newer one started is ignored.
+    private var loadGeneration = 0
+    private var loadingTarget: (path: URL, id: String)?
     private var lastProgressTime = Date()
     private var lastProgressBytes: Int64 = 0
     private let log = Logger(subsystem: "io.github.mason363.Foreword", category: "model")
@@ -84,11 +88,13 @@ final class ModelManager: NSObject, ObservableObject {
     }
 
     func unload() {
+        loadGeneration += 1 // a load in flight is now stale
+        loadingTarget = nil
         engine?.cancel()
         engine = nil
         loadedModelID = nil
         loadedDescription = nil
-        if !status.isBusy { status = .notDownloaded }
+        if !status.isBusy || status == .loading { status = .notDownloaded }
     }
 
     func recordLatency(_ ms: Double) {
@@ -103,6 +109,10 @@ final class ModelManager: NSObject, ObservableObject {
     // MARK: Loading
 
     private func load(path: URL, id: String) {
+        if let target = loadingTarget, target.path == path, target.id == id, status == .loading { return } // already on it
+        loadGeneration += 1
+        let generation = loadGeneration
+        loadingTarget = (path, id)
         status = .loading
         let started = Date()
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -113,7 +123,8 @@ final class ModelManager: NSObject, ObservableObject {
                 _ = try? engine.completeNow(CompletionRequest(context: "", prefix: "Thanks for getting back to me so"))
                 let description = engine.model.summary
                 await MainActor.run {
-                    guard let self else { return }
+                    guard let self, generation == self.loadGeneration else { engine.cancel(); return }
+                    self.loadingTarget = nil
                     guard Preferences.shared.modelID == id else { return } // switched meanwhile
                     self.engine = engine
                     self.loadedModelID = id
@@ -124,8 +135,10 @@ final class ModelManager: NSObject, ObservableObject {
                 }
             } catch {
                 await MainActor.run {
-                    self?.status = .failed("The model could not be loaded. Try downloading it again.")
-                    self?.log.error("Load failed: \(String(describing: error), privacy: .public)")
+                    guard let self, generation == self.loadGeneration else { return } // superseded
+                    self.loadingTarget = nil
+                    self.status = .failed("The model could not be loaded. Try downloading it again.")
+                    self.log.error("Load failed: \(String(describing: error), privacy: .public)")
                 }
             }
         }
@@ -144,8 +157,8 @@ final class ModelManager: NSObject, ObservableObject {
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         downloadSession = session
         let task: URLSessionDownloadTask
-        if let resumeData {
-            task = session.downloadTask(withResumeData: resumeData)
+        if let resumeData, resumeData.specID == spec.id {
+            task = session.downloadTask(withResumeData: resumeData.data)
         } else {
             var request = URLRequest(url: spec.url)
             request.setValue("Foreword", forHTTPHeaderField: "User-Agent")
@@ -160,13 +173,22 @@ final class ModelManager: NSObject, ObservableObject {
     }
 
     func cancelDownload() {
+        let specID = downloadingSpec?.id
         downloadTask?.cancel(byProducingResumeData: { [weak self] data in
-            Task { @MainActor in self?.resumeData = data }
+            Task { @MainActor in
+                if let data, let specID { self?.resumeData = (specID, data) }
+            }
         })
         downloadTask = nil
+        downloadingSpec = nil
         downloadSession?.finishTasksAndInvalidate()
         downloadSession = nil
-        status = .notDownloaded
+        status = engine != nil ? .ready : .notDownloaded
+    }
+
+    /// Whether a delegate callback belongs to the download in progress (not one cancelled earlier).
+    fileprivate func isCurrent(_ task: URLSessionTask) -> Bool {
+        downloadTask.map { $0.taskIdentifier == task.taskIdentifier } ?? false
     }
 
     func delete(_ spec: ModelSpec) {
@@ -240,18 +262,23 @@ extension ModelManager: URLSessionDownloadDelegate {
         if let http = downloadTask.response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             try? FileManager.default.removeItem(at: staging)
             Task { @MainActor in
+                guard self.isCurrent(downloadTask) else { return }
                 self.downloadTask = nil
+                self.downloadingSpec = nil
                 self.status = .failed("The server returned an error (\(http.statusCode)).")
             }
             return
         }
-        Task { @MainActor in self.finishDownload(at: staging) }
+        Task { @MainActor in
+            guard self.isCurrent(downloadTask) else { try? FileManager.default.removeItem(at: staging); return }
+            self.finishDownload(at: staging)
+        }
     }
 
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
                                 totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         Task { @MainActor in
-            guard let spec = self.downloadingSpec else { return }
+            guard self.isCurrent(downloadTask), let spec = self.downloadingSpec else { return }
             let total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : spec.bytes
             let now = Date()
             let elapsed = now.timeIntervalSince(self.lastProgressTime)
@@ -272,9 +299,12 @@ extension ModelManager: URLSessionDownloadDelegate {
         let nsError = error as NSError
         let resume = nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
         Task { @MainActor in
+            guard self.isCurrent(task) else { return }
+            let specID = self.downloadingSpec?.id
             self.downloadTask = nil
+            self.downloadingSpec = nil
             if nsError.code == NSURLErrorCancelled { return }
-            self.resumeData = resume
+            if let resume, let specID { self.resumeData = (specID, resume) }
             self.status = .failed("Download interrupted: \(error.localizedDescription)")
         }
     }

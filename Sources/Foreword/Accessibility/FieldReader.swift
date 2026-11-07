@@ -75,7 +75,7 @@ struct FieldSnapshot {
     var hasSelection: Bool { selection.length > 0 }
     /// Text after the caret on the same line.
     var lineSuffix: Substring {
-        suffix.prefix(while: { $0 != "\n" && $0 != "\r" && $0 != "\u{2028}" && $0 != "\u{2029}" })
+        suffix.prefix(while: { !$0.isNewline })
     }
 }
 
@@ -103,9 +103,20 @@ enum FieldReader {
 
     /// Some apps (Pages, Keynote) report the document's scroll area as focused; the text area that
     /// really holds the caret is a descendant that says it's focused.
+    private static var containerSearch: (container: AXElement, result: AXElement, at: TimeInterval)?
+
     static func focusedText(in element: AXElement) -> AXElement {
         guard element.raw(kAXSelectedTextRangeAttribute) == nil,
               let role = element.role, containerRoles.contains(role) else { return element }
+        // The focus poll asks every 0.6 s; while focus rests on the same container, reuse the answer.
+        let now = ProcessInfo.processInfo.systemUptime
+        if let cached = containerSearch, cached.container == element, now - cached.at < 3 { return cached.result }
+        let result = searchFocusedText(in: element)
+        containerSearch = (element, result, now)
+        return result
+    }
+
+    private static func searchFocusedText(in element: AXElement) -> AXElement {
         var queue: [(AXElement, Int)] = [(element, 0)]
         var visited = 0
         while !queue.isEmpty, visited < 400 {
@@ -191,8 +202,9 @@ enum FieldReader {
             windowTitle = AXElement(windowValue as! AXUIElement).string(kAXTitleAttribute)
         }
         let webArea = markerDocument ? element : element.ancestor(maxDepth: 40, where: { $0.role == "AXWebArea" })
-        let url = webArea.flatMap(webURL(of:))
-        let domain = url.flatMap { URL(string: $0)?.host?.replacingOccurrences(of: "www.", with: "") }
+        // Site rules follow the page in the address bar, not an editor embedded in a frame of it.
+        let url = webArea.flatMap(pageURL(from:))
+        let domain = url.flatMap { URL(string: $0)?.host }.map { $0.hasPrefix("www.") ? String($0.dropFirst(4)) : $0 }
 
         var info = FieldInfo(
             element: element, pid: pid, bundleID: app?.bundleIdentifier, appName: app?.localizedName,
@@ -222,6 +234,19 @@ enum FieldReader {
         let children = element.children
         guard children.count == 1, let child = children.first, child.role == "AXGroup" else { return !children.isEmpty }
         return !child.children.allSatisfy { $0.role == "AXStaticText" } || child.children.count > 1
+    }
+
+    /// The URL of the outermost web page containing `webArea` (frames nest web areas).
+    static func pageURL(from webArea: AXElement) -> String? {
+        var best = webURL(of: webArea).flatMap { URL(string: $0)?.host != nil ? $0 : nil }
+        var current = webArea.parent
+        var depth = 0
+        while let element = current, depth < 60 {
+            if element.role == "AXWebArea", let url = webURL(of: element), URL(string: url)?.host != nil { best = url }
+            current = element.parent
+            depth += 1
+        }
+        return best ?? webURL(of: webArea)
     }
 
     /// The URL of a web area.
@@ -277,13 +302,19 @@ enum FieldReader {
         } else {
             guard end <= total else { return nil }
             let start = alignedStart
-            prefix = element.string(for: CFRange(location: start, length: caret - start)) ?? ""
-            let length = min(total - end, suffixLimit)
-            suffix = length > 0 ? (element.string(for: CFRange(location: end, length: length)) ?? "") : ""
-            // Drop a possibly split surrogate at the window start.
-            if let first = prefix.unicodeScalars.first, first.properties.generalCategory == .surrogate {
-                prefix.removeFirst()
+            // A failed read is a failed snapshot, never an empty field (that would look like "sent").
+            if caret > start {
+                guard let text = element.string(for: CFRange(location: start, length: caret - start)) else { return nil }
+                prefix = text
             }
+            let length = min(total - end, suffixLimit)
+            if length > 0 {
+                guard let text = element.string(for: CFRange(location: end, length: length)) else { return nil }
+                suffix = text
+            }
+            // A window edge can split a surrogate pair; Swift turns the lone half into U+FFFD.
+            if prefix.unicodeScalars.first == "\u{FFFD}" { prefix.unicodeScalars.removeFirst() }
+            if suffix.unicodeScalars.last == "\u{FFFD}" { suffix.unicodeScalars.removeLast() }
         }
 
         var snapshot = FieldSnapshot(info: info, prefix: prefix, suffix: suffix, selection: selection, totalLength: total,
@@ -316,6 +347,12 @@ enum FieldReader {
         guard let scroll = info.scrollArea?.frame, scroll.width > 0, scroll.height > 0 else { return fieldFrame }
         let clipped = fieldFrame.intersection(scroll)
         return clipped.isNull || clipped.isEmpty ? fieldFrame : clipped
+    }
+
+    /// Tabs, attachments and control characters take up space that isn't the font's: such text
+    /// can't calibrate size or identify the face.
+    static func containsLayoutCharacters(_ text: String) -> Bool {
+        text.unicodeScalars.contains { $0 == "\t" || $0 == "\u{FFFC}" || $0.properties.generalCategory == .control }
     }
 
     /// Records the start of the caret's line and the text from there to the caret (the last
@@ -401,7 +438,7 @@ enum FieldReader {
             if let text = string(line, in: element), !text.isEmpty, !text.contains(where: \.isNewline),
                let r = validRect(bounds(line, in: element), near: frame), let caret = snapshot.caret,
                abs(r.minY - caret.minY) < caret.height * 0.5, abs(r.height - caret.height) < caret.height * 0.5 {
-                if text.count >= 4 {
+                if text.count >= 4, !containsLayoutCharacters(text) {
                     snapshot.sampleText = text
                     snapshot.sampleWidth = r.width
                 }
@@ -473,13 +510,17 @@ enum FieldReader {
 
         let start = max(0, ((caret - prefixLimit) / 1024) * 1024)
         var prefix = ""
-        if caret > start, let startMarker = marker(at: start, in: element) {
-            prefix = string(markerRange(startMarker, caretMarker), in: element) ?? ""
+        if caret > start {
+            guard let startMarker = marker(at: start, in: element),
+                  let text = string(markerRange(startMarker, caretMarker), in: element) else { return nil }
+            prefix = text
         }
         var suffix = ""
         let stop = min(total, end + suffixLimit)
-        if stop > end, let stopMarker = marker(at: stop, in: element) {
-            suffix = string(markerRange(selectionEnd, stopMarker), in: element) ?? ""
+        if stop > end {
+            guard let stopMarker = marker(at: stop, in: element),
+                  let text = string(markerRange(selectionEnd, stopMarker), in: element) else { return nil }
+            suffix = text
         }
         let frame = element.frame
         var snapshot = FieldSnapshot(info: info, prefix: prefix, suffix: suffix,
@@ -562,7 +603,7 @@ enum FieldReader {
         let frame = snapshot.fieldFrame
         let previous = snapshot.prefix.last
         let next = snapshot.suffix.first
-        let previousIsBreak = previous.map { $0 == "\n" || $0 == "\r" || $0 == "\u{2029}" || $0 == "\u{2028}" } ?? true
+        let previousIsBreak = previous.map { $0.isNewline } ?? true
         let previousLength = snapshot.prefix.last.map { String($0).utf16.count } ?? 1
 
         // The character before the caret is the most reliable anchor across apps. A collapsed range is
@@ -588,7 +629,7 @@ enum FieldReader {
             }
         }
         // At the start of a line with text after the caret: that character's box is on the caret's line.
-        if snapshot.caret == nil, let next, next != "\n", next != "\r",
+        if snapshot.caret == nil, let next, !next.isNewline,
            let r = validRect(element.bounds(for: CFRange(location: location, length: String(next).utf16.count)), near: frame) {
             snapshot.caret = CGRect(x: r.minX, y: r.minY, width: 0, height: r.height)
         }
@@ -679,7 +720,7 @@ enum FieldReader {
             // identifies the font when the app doesn't name it.
             let lineTail = snapshot.prefix.suffix(24).split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline })
                 .last.map(String.init) ?? ""
-            if lineTail.count >= 4, let caret = snapshot.caret {
+            if lineTail.count >= 4, !containsLayoutCharacters(lineTail), let caret = snapshot.caret {
                 let length = lineTail.utf16.count
                 if let r = validRect(element.bounds(for: CFRange(location: location - length, length: length)), near: frame),
                    abs(r.minY - caret.minY) < caret.height * 0.5, abs(r.height - caret.height) < caret.height * 0.5 {

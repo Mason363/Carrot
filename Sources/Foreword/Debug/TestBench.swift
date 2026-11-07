@@ -179,6 +179,11 @@ final class TestBenchController: NSObject, WKNavigationDelegate {
             downloadReport = "status=\(models.status) downloaded=\(ModelCatalog.isDownloaded(spec)) seconds=\(Int(Date().timeIntervalSince(started)))"
         case "render":
             renderViews(to: cmd["dir"] as? String ?? NSTemporaryDirectory())
+        case "openSettings":
+            openSettings()
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            let titles = NSApp.windows.filter { $0.isVisible }.map { "\($0.title)|\($0.identifier?.rawValue ?? "")|key=\($0.isKeyWindow)" }
+            FileHandle.standardError.write("windows: \(titles)\n".data(using: .utf8)!)
         case "wait":
             try? await Task.sleep(nanoseconds: UInt64((cmd["seconds"] as? Double ?? 0.5) * 1e9))
         default:

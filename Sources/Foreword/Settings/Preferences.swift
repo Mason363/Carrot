@@ -21,7 +21,30 @@ final class Preferences: ObservableObject {
     }
 
     @Published var isEnabled: Bool { didSet { defaults.set(isEnabled, forKey: "isEnabled") } }
-    @Published var pausedUntil: Date? { didSet { defaults.set(pausedUntil, forKey: "pausedUntil") } }
+    @Published var pausedUntil: Date? {
+        didSet {
+            defaults.set(pausedUntil, forKey: "pausedUntil")
+            schedulePauseEnd()
+        }
+    }
+    private var pauseTimer: Timer?
+
+    /// Clears the pause when it runs out, so everything watching preferences (the focused field,
+    /// the menu bar icon) wakes up on time.
+    private func schedulePauseEnd() {
+        pauseTimer?.invalidate()
+        pauseTimer = nil
+        guard let until = pausedUntil else { return }
+        guard until > Date() else {
+            DispatchQueue.main.async { [weak self] in if self?.pausedUntil == until { self?.pausedUntil = nil } }
+            return
+        }
+        let timer = Timer(fire: until.addingTimeInterval(0.5), interval: 0, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async { if self?.pausedUntil == until { self?.pausedUntil = nil } }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        pauseTimer = timer
+    }
     /// 0 = only very confident suggestions, 1 = suggest often.
     @Published var eagerness: Double { didSet { defaults.set(eagerness, forKey: "eagerness") } }
     @Published var length: SuggestionLength { didSet { defaults.set(length.rawValue, forKey: "length") } }
@@ -70,7 +93,9 @@ final class Preferences: ObservableObject {
         acceptAllKey = acceptAll
         acceptWordKey = acceptWord
         dismissKey = Self.load("dismissKey", defaults) ?? .escape
-        toggleShortcut = Self.load("toggleShortcut", defaults)
+        // A global shortcut without ⌘, ⌃ or ⌥ (an older recorder could save a bare Esc) eats normal typing.
+        let savedToggle: KeyCombo? = Self.load("toggleShortcut", defaults)
+        toggleShortcut = savedToggle.flatMap { $0.modifierFlags.intersection([.command, .control, .option]).isEmpty ? nil : $0 }
         typoCorrection = defaults.bool(forKey: "typoCorrection")
         midLineSuggestions = defaults.bool(forKey: "midLineSuggestions")
         ghostColor = GhostColor(rawValue: defaults.string(forKey: "ghostColor") ?? "") ?? .automatic
@@ -86,6 +111,7 @@ final class Preferences: ObservableObject {
         modelID = defaults.string(forKey: "modelID") ?? ModelCatalog.defaultModel.id
         customModelPath = defaults.string(forKey: "customModelPath")
         hasCompletedOnboarding = defaults.bool(forKey: "hasCompletedOnboarding")
+        schedulePauseEnd() // didSet doesn't run during init
     }
 
     private func save<T: Encodable>(_ value: T?, _ key: String) {
