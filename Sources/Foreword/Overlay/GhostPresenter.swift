@@ -15,6 +15,8 @@ final class GhostPresenter {
     /// Where the current line starts (AX x), narrowed keystroke by keystroke: each new set of rounded
     /// boxes bounds it differently.
     private var lineStartEstimate: (element: AXElement, line: CGRect, range: ClosedRange<CGFloat>)?
+    /// The last inline suggestion shown, to lay it out again when a screen calibration arrives.
+    private var lastShowRequest: (text: String, snapshot: FieldSnapshot, preferPill: Bool)?
 
     struct Layout {
         var caret: CGRect          // AX coordinates
@@ -49,14 +51,24 @@ final class GhostPresenter {
               correctionRect: CGRect? = nil) -> String? {
         let prefs = Preferences.shared
         guard var caretRect = correctionRect ?? snapshot.caret ?? fallbackCaret(for: snapshot) else { hide(); return nil }
+        lastShowRequest = original == nil ? (text, snapshot, preferPill) : nil
         let engine = snapshot.info.engine
         let reportedHeight = snapshot.reportedCaret?.height
-        let font = matchedFont(name: snapshot.fontName, size: snapshot.fontSize, caretHeight: caretRect.height,
+        var font = matchedFont(name: snapshot.fontName, size: snapshot.fontSize, caretHeight: caretRect.height,
                                sampleText: snapshot.sampleText, sampleWidth: snapshot.sampleWidth,
                                web: snapshot.info.isWebContent,
                                heightCheck: reportedHeight == nil || engine != .blink ? nil : { height in
                                    { font in TextEngine.blinkBoxHeights(font: font, scale: 2).contains(height.rounded()) }
                                })
+        // A face identified from the screen beats one guessed from widths.
+        let calibrationKey = snapshot.lineStart.map {
+            ScreenCalibrator.LineKey(element: snapshot.info.element, lineTop: Int(($0.minY * 2).rounded()),
+                                     lineStartX: Int(($0.minX * 2).rounded()), fontSize: Int((font.pointSize * 100).rounded()))
+        }
+        if snapshot.fontName == nil, let key = calibrationKey, let calibration = ScreenCalibrator.shared.calibration(for: key),
+           calibration.fontName != font.fontName, let face = Self.resolveFont(calibration.fontName, size: font.pointSize) {
+            font = face
+        }
         let color = ghostColor(textColor: snapshot.textColor)
         let hint = prefs.showKeyHint ? prefs.acceptAllKey.displayString : nil
         let screen = ScreenGeometry.screen(containing: CGPoint(x: caretRect.midX, y: ScreenGeometry.primaryHeight - caretRect.midY))
@@ -85,12 +97,40 @@ final class GhostPresenter {
                                        isRichText: snapshot.info.isRichText, laterLineInBlock: snapshot.laterLineInBlock,
                                        textBox: snapshot.laterLineInBlock ? nil : snapshot.textBox)
         }
-        let baseline = modelBaseline
+        var baseline = modelBaseline
             ?? round(Self.baseline(for: font, lineHeight: caretRect.height, web: snapshot.info.isWebContent) * scale) / scale
+        // Screen calibration, when on: where this line's text really is, measured from the screen.
+        var calibrationNeeded: (key: ScreenCalibrator.LineKey, lineText: String, lineAdvance: CGFloat)?
+        let calibratedLeft: CGFloat? = nil
+        // Web content only: native text reports exact geometry, and the screen is looked at as
+        // little as possible.
+        if style == .inline, correctionRect == nil, snapshot.caret != nil, !snapshot.caretIsEstimated,
+           snapshot.info.isWebContent, let key = calibrationKey, let lineText = snapshot.lineText,
+           ScreenCalibrator.shared.isEnabled {
+            let lineAdvance = GhostView.exactWidth(of: lineText, font: font, kernsAfterSpaces: kernsAfterSpaces)
+            if let calibration = ScreenCalibrator.shared.calibration(for: key) {
+                // The pixel row the text sits on is unambiguous. The horizontal fit is only used
+                // where the app's glyph advances are CoreText's own (Chromium); WebKit and AppKit lay
+                // glyphs out a hair differently, so there the caret geometry stays in charge.
+                let b = ((calibration.baselineY - caretRect.minY) * scale).rounded(.toNearestOrAwayFromZero) / scale
+                if abs(b - baseline) <= 1.5 { baseline = b }
+                if engine == .blink {
+                    let x = calibration.lineStartX + lineAdvance
+                    if abs(x - caretRect.minX) <= 1.0 { caretRect.origin.x = x }
+                }
+                if calibration.characters < 8, lineText.count >= calibration.characters * 2 + 2 {
+                    calibrationNeeded = (key, lineText, lineAdvance) // measure again with more text
+                }
+            } else {
+                calibrationNeeded = (key, lineText, lineAdvance)
+            }
+        }
         // The app kerns the letter before the caret with the next one typed; the ghost's first letter
         // sits where that letter will.
+        var kerningShift: CGFloat = 0
         if style == .inline, correctionRect == nil, let previous = snapshot.prefix.last, let first = shown.first {
-            caretRect.origin.x += GhostView.pairKerning(previous, first, font: font, kernsAfterSpaces: kernsAfterSpaces)
+            kerningShift = GhostView.pairKerning(previous, first, font: font, kernsAfterSpaces: kernsAfterSpaces)
+            caretRect.origin.x += kerningShift
         }
 
         // Continuation lines when the suggestion runs past the end of the line, laid out the way the
@@ -100,7 +140,8 @@ final class GhostPresenter {
             if preferPill || snapshot.caretIsEstimated || snapshot.caret == nil {
                 style = .pill
             } else {
-                let wrap = wrapGeometry(snapshot: snapshot, caret: caretRect, font: font, engine: engine, scale: scale)
+                let wrap = wrapGeometry(snapshot: snapshot, caret: caretRect, font: font, engine: engine, scale: scale,
+                                        calibratedLeft: calibratedLeft)
                 // Does it fit before the end of the line?
                 let available: CGFloat
                 if let wrap {
@@ -185,6 +226,11 @@ final class GhostPresenter {
 
         apply(content: content, frame: frame)
         lastLayout = Layout(caret: caretRect, font: font, baseline: baseline, style: style, frame: frame, anchorX: cocoaCaret.minX)
+        if let needed = calibrationNeeded, style == .inline {
+            requestCalibration(needed.key, lineText: needed.lineText, lineAdvance: needed.lineAdvance, snapshot: snapshot,
+                               font: font, kernsAfterSpaces: kernsAfterSpaces, penX: caretRect.minX - kerningShift,
+                               baselineY: caretRect.minY + baseline, scale: scale, text: text, preferPill: preferPill)
+        }
         if TestBench.isDebugging {
             let r = snapshot.reportedCaret, ls = snapshot.lineStart
             let est = lineStartEstimate.map { String(format: "[%.3f, %.3f]", $0.range.lowerBound, $0.range.upperBound) } ?? "nil"
@@ -255,6 +301,7 @@ final class GhostPresenter {
         content = nil
         displayedText = ""
         lastLayout = nil
+        lastShowRequest = nil
         panel.alphaValue = 0
         view.content = nil
     }
@@ -320,7 +367,7 @@ final class GhostPresenter {
     private static let webCandidates = [
         ".AppleSystemUIFont", "Arial", "Helvetica", "HelveticaNeue", "Roboto", "Inter", "Google Sans Text", "Open Sans",
         "Lato", "Verdana", "Tahoma", "Trebuchet MS", "Georgia", "Times New Roman", "Charter", "Menlo", "Courier New",
-        "SF Mono", "Avenir Next",
+        "SF Mono", "Avenir Next", "Courier", "Times",
     ]
     private var fingerprintCache: [String: (name: String, size: CGFloat)] = [:]
 
@@ -492,6 +539,75 @@ final class GhostPresenter {
         return abs(x - (reported.minX + reported.width / 2)) <= 2 ? x : nil
     }
 
+    /// Captures the text before the caret once for this line; when the measurement arrives, the
+    /// ghost is laid out again with it.
+    private func requestCalibration(_ key: ScreenCalibrator.LineKey, lineText: String, lineAdvance: CGFloat,
+                                    snapshot: FieldSnapshot, font: NSFont, kernsAfterSpaces: Bool, penX: CGFloat,
+                                    baselineY: CGFloat, scale: CGFloat, text: String, preferPill: Bool) {
+        // The last few words before the caret, minus the newest character: the app may not have
+        // painted it yet when the capture is taken.
+        // Short, so small differences in glyph widths can't add up across it.
+        var tail = String(lineText.dropLast().suffix(12))
+        if tail.count == 12, let space = tail.firstIndex(of: " "), tail.distance(from: tail.startIndex, to: space) < 6 {
+            tail = String(tail[tail.index(after: space)...])
+        }
+        let newest = String(lineText.suffix(1))
+        guard tail.unicodeScalars.filter({ TextAnalysis.isWordScalar($0) }).count >= 3 else {
+            if TestBench.isDebugging { FileHandle.standardError.write("calibration: tail too short\n".data(using: .utf8)!) }
+            return
+        }
+        let newestWidth = GhostView.exactWidth(of: newest, font: font, kernsAfterSpaces: kernsAfterSpaces)
+        let tailOffset = lineAdvance - newestWidth - GhostView.exactWidth(of: tail, font: font, kernsAfterSpaces: kernsAfterSpaces)
+        // Pen position of the tail, by the app's own geometry.
+        let lineStartX = penX - lineAdvance
+        let tailX = lineStartX + tailOffset
+        // Stop before the newest character (and so before the caret and the ghost).
+        // (A caret drawn right after the tail, if the app hasn't painted the newest letter yet, stays out too.)
+        let right = min(penX - newestWidth, (snapshot.reportedCaret?.minX ?? penX)) - 1.5
+        // Whole points: ScreenCaptureKit resamples a source rectangle that isn't point-aligned.
+        let left = (tailX - 2).rounded(.down)
+        let top = (baselineY - font.ascender - 3).rounded(.down)
+        let bottom = (baselineY - font.descender + 3).rounded(.up)
+        let width = (right - left).rounded(.down)
+        guard width >= 6, bottom - top >= 6 else {
+            if TestBench.isDebugging { FileHandle.standardError.write("calibration: region too small\n".data(using: .utf8)!) }
+            return
+        }
+        if TestBench.isDebugging {
+            FileHandle.standardError.write(String(format: "calibration: request %@ caret %@ pen %.2f baseline %.2f lineAdvance %.2f tail '%@'\n",
+                                                  snapshot.info.role ?? "?", NSStringFromRect(snapshot.caret ?? .zero), penX, baselineY,
+                                                  lineAdvance, tail).data(using: .utf8)!)
+        }
+        let region = CGRect(x: left, y: top, width: width, height: bottom - top)
+        var candidates = [ScreenCalibrator.Candidate(
+            request: CalibrationMatcher.Request(text: tail, font: font, kernsAfterSpaces: kernsAfterSpaces, penX: tailX,
+                                                baselineY: baselineY, region: region, scale: scale),
+            lineOffset: tailOffset)]
+        // When the app didn't name the face, others with the same widths are just as likely: let
+        // the screen decide between them.
+        if snapshot.fontName == nil, snapshot.info.isWebContent {
+            for name in Self.webCandidates {
+                guard let other = Self.font(named: name, size: font.pointSize), other.fontName != font.fontName,
+                      abs(GhostView.exactWidth(of: lineText, font: other, kernsAfterSpaces: kernsAfterSpaces) - lineAdvance)
+                        <= max(0.6, lineAdvance * 0.006) else { continue }
+                let otherTail = GhostView.exactWidth(of: tail, font: other, kernsAfterSpaces: kernsAfterSpaces)
+                let otherNewest = GhostView.exactWidth(of: newest, font: other, kernsAfterSpaces: kernsAfterSpaces)
+                let otherAdvance = GhostView.exactWidth(of: lineText, font: other, kernsAfterSpaces: kernsAfterSpaces)
+                let offset = otherAdvance - otherNewest - otherTail
+                candidates.append(ScreenCalibrator.Candidate(
+                    request: CalibrationMatcher.Request(text: tail, font: other, kernsAfterSpaces: kernsAfterSpaces,
+                                                        penX: lineStartX + offset, baselineY: baselineY, region: region, scale: scale),
+                    lineOffset: offset))
+            }
+        }
+        ScreenCalibrator.shared.calibrate(key, candidates: candidates) { [weak self] in
+            guard let self, self.isVisible, self.content?.style == .inline,
+                  self.lastShowRequest?.snapshot.info.element == key.element,
+                  let last = self.lastShowRequest else { return }
+            self.show(last.text, snapshot: last.snapshot, preferPill: last.preferPill)
+        }
+    }
+
     struct WrapGeometry {
         /// AX x where continuation lines start, and where lines end.
         var left: CGFloat
@@ -505,13 +621,14 @@ final class GhostPresenter {
     /// How the field wraps lines: continuation lines start at the paragraph's left edge, and text
     /// stops as far inside the right edge as it starts inside the left (padding is symmetric).
     private func wrapGeometry(snapshot: FieldSnapshot, caret: CGRect, font: NSFont, engine: TextEngine,
-                              scale: CGFloat) -> WrapGeometry? {
+                              scale: CGFloat, calibratedLeft: CGFloat? = nil) -> WrapGeometry? {
         guard !snapshot.info.isSingleLine, let field = snapshot.fieldFrame, field.width > 40,
               let lineStart = snapshot.lineStart else { return nil }
         // A web page's line spacing (CSS line-height) is only knowable from two lines on screen.
         if engine != .native, snapshot.previousLineTop == nil { return nil }
         var left = lineStart.minX
         if engine == .webkit, lineStart.width > 2.5 && lineStart.width < 3.5 { left += 0.5 }
+        if let calibratedLeft, abs(calibratedLeft - left) < 1.5 { left = calibratedLeft }
         let inset = left - field.minX
         guard inset >= 0, inset < field.width / 3 else { return nil }
         let right = field.maxX - inset

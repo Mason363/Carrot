@@ -36,6 +36,9 @@ enum TestBench {
     /// without saving memory, stats or per-app adjustments.
     static let isLiveTest = CommandLine.arguments.contains("--live-test")
     /// Any test mode: never persist the user's data, log requests.
+    /// `--exact-placement`: turn screen calibration on for this run without saving the preference.
+    static let forcesExactPlacement = CommandLine.arguments.contains("--exact-placement")
+
     static var isDebugging: Bool { isActive || observedBundleID != nil || isLiveTest }
     /// Modes that must never touch global keyboard input.
     static var disablesGlobalInput: Bool { isActive || observedBundleID != nil }
@@ -68,9 +71,10 @@ final class TestBenchController: NSObject, WKNavigationDelegate {
         panel.level = .floating
         panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
-        // Always the primary display, same place, so measurements are repeatable.
-        if let screen = NSScreen.screens.first {
-            panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.maxX - 660, y: screen.visibleFrame.minY + 20))
+        // Always the display at the global origin, fully on it, so measurements are repeatable.
+        if let screen = NSScreen.screens.first(where: { $0.frame.origin == .zero }) ?? NSScreen.main {
+            let visible = screen.visibleFrame
+            panel.setFrameOrigin(NSPoint(x: visible.maxX - 660, y: max(visible.minY + 20, visible.minY)))
         }
         let content = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
 
@@ -97,6 +101,11 @@ final class TestBenchController: NSObject, WKNavigationDelegate {
 
         panel.contentView = content
         panel.orderFrontRegardless()
+        if let screen = panel.screen ?? NSScreen.main, !screen.visibleFrame.contains(panel.frame) {
+            let visible = screen.visibleFrame
+            panel.setFrameOrigin(NSPoint(x: min(max(panel.frame.minX, visible.minX), visible.maxX - panel.frame.width),
+                                         y: min(max(panel.frame.minY, visible.minY), visible.maxY - panel.frame.height)))
+        }
         window = panel
 
         TestBench.insertHandler = { [weak self] text in self?.insert(text) }

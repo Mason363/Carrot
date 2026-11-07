@@ -57,6 +57,8 @@ final class Preferences: ObservableObject {
     @Published var ghostColor: GhostColor { didSet { defaults.set(ghostColor.rawValue, forKey: "ghostColor") } }
     @Published var ghostOpacity: Double { didSet { defaults.set(ghostOpacity, forKey: "ghostOpacity") } }
     @Published var showKeyHint: Bool { didSet { defaults.set(showKeyHint, forKey: "showKeyHint") } }
+    /// Line ghost text up with web pages' text by looking at the screen (needs Screen Recording).
+    @Published var exactPlacement: Bool { didSet { defaults.set(exactPlacement, forKey: "exactPlacement") } }
     /// Accepting a word also takes the punctuation attached to it ("Thursday," rather than "Thursday").
     @Published var wordIncludesPunctuation: Bool { didSet { defaults.set(wordIncludesPunctuation, forKey: "wordIncludesPunctuation") } }
     /// Explicit per-app choices (bundle id → enabled). Apps without an entry use `AppRules` defaults.
@@ -75,7 +77,7 @@ final class Preferences: ObservableObject {
         defaults.register(defaults: [
             "isEnabled": true, "eagerness": 0.5, "length": SuggestionLength.medium.rawValue,
             "typoCorrection": true, "midLineSuggestions": true, "ghostColor": GhostColor.automatic.rawValue,
-            "ghostOpacity": 0.45, "showKeyHint": true, "wordIncludesPunctuation": false,
+            "ghostOpacity": 0.45, "showKeyHint": true, "wordIncludesPunctuation": false, "exactPlacement": false,
             "memoryEnabled": true, "useScreenContext": true, "useClipboard": true,
             "modelID": ModelCatalog.defaultModel.id, "hasCompletedOnboarding": false,
         ])
@@ -102,6 +104,7 @@ final class Preferences: ObservableObject {
         ghostOpacity = defaults.double(forKey: "ghostOpacity")
         showKeyHint = defaults.bool(forKey: "showKeyHint")
         wordIncludesPunctuation = defaults.bool(forKey: "wordIncludesPunctuation")
+        exactPlacement = defaults.bool(forKey: "exactPlacement") || TestBench.forcesExactPlacement
         appOverrides = defaults.dictionary(forKey: "appOverrides") as? [String: Bool] ?? [:]
         disabledSites = defaults.stringArray(forKey: "disabledSites") ?? []
         aboutMe = defaults.string(forKey: "aboutMe") ?? ""

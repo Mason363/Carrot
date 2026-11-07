@@ -151,8 +151,44 @@ struct AppearanceSettings: View {
                     Text("When a suggestion can't sit inline — in the middle of a line, or where the cursor position is uncertain — it appears in a small card below the text.")
                 }
             }
+            Section {
+                Toggle(isOn: Binding(get: { prefs.exactPlacement }, set: { on in
+                    prefs.exactPlacement = on
+                    if on && !ScreenCalibrator.hasPermission { ScreenCalibrator.requestPermission() }
+                    ScreenCalibrator.shared.forgetAll()
+                })) {
+                    Text("Exact placement in browsers")
+                    Text("Web pages only tell other apps where their text is to the nearest point, so suggestions in Chrome, Safari and web apps can sit a pixel off. With this on, Foreword looks at the text just before your cursor once per line to line suggestions up exactly. What it sees is only compared with the suggestion's text, never saved or sent anywhere.")
+                }
+                if prefs.exactPlacement {
+                    ScreenRecordingRow()
+                }
+            }
         }
         .formStyle(.grouped)
+    }
+}
+
+struct ScreenRecordingRow: View {
+    @State private var allowed = ScreenCalibrator.hasPermission
+    private let timer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Group {
+            if allowed {
+                Label("Screen Recording is allowed", systemImage: "checkmark.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                HStack {
+                    Text("Needs Screen Recording permission: turn on Foreword in Privacy & Security › Screen & System Audio Recording. macOS may ask you to reopen Foreword.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("Open Settings") { ScreenCalibrator.requestPermission() }
+                }
+            }
+        }
+        .onReceive(timer) { _ in allowed = ScreenCalibrator.hasPermission }
     }
 }
 

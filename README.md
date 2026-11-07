@@ -45,6 +45,8 @@ It runs a small language model on your Mac's GPU. There's no account, no subscri
 
 Punctuation after a word comes with the next press: "Monday." is accepted as "Monday", then ".". **Settings › Keyboard** can include it with the word instead, and all keys can be changed there. They're only taken over while a suggestion is showing.
 
+**Exact placement in browsers** (Settings › Appearance, off by default): web pages only tell other apps where their text is to the nearest point, so in Chrome, Safari and web apps a suggestion can sit a pixel off. With this on, Foreword looks at the few characters just before your cursor once per line and lines the suggestion up exactly. It needs the Screen Recording permission; what it sees is compared with the suggestion's text in memory and never saved or sent anywhere.
+
 **Settings** (menu bar icon › Settings…) lets you choose how often suggestions appear and how long they get, pick colors, turn Foreword off for specific apps or websites, describe yourself for more personal suggestions, and switch models.
 
 ## Models

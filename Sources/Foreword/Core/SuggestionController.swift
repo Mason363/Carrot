@@ -846,6 +846,7 @@ final class SuggestionController: ObservableObject {
             "header": assembler.header.replacingOccurrences(
                 of: "Recently copied:\n\"\"\"\n[\\s\\S]*?\n\"\"\"", with: "Recently copied: [redacted]", options: .regularExpression),
             "clipboardAccess": "\(ClipboardMonitor.shared.access)",
+            "screenRecording": ScreenCalibrator.hasPermission, "exactPlacement": prefs.exactPlacement,
         ]
     }
 

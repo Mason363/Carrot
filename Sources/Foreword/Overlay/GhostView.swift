@@ -99,8 +99,6 @@ final class GhostView: NSView {
 
     private func drawLine(_ text: String, font: NSFont, color: NSColor, x: CGFloat, baseline: CGFloat,
                           kernsAfterSpaces: Bool = true, in context: CGContext) {
-        let attributed = Self.attributed(text, font: font, color: color, kernsAfterSpaces: kernsAfterSpaces)
-        let line = CTLineCreateWithAttributedString(attributed)
         context.saveGState()
         // Fractional glyph positions, like the apps whose text we continue.
         context.setAllowsFontSubpixelPositioning(true)
@@ -110,9 +108,21 @@ final class GhostView: NSView {
         context.setShouldSubpixelQuantizeFonts(true)
         // Flipped view: undo the flip for CoreText.
         context.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
-        context.textPosition = CGPoint(x: x, y: baseline)
-        CTLineDraw(line, context)
+        Self.draw(text, font: font, color: color, kernsAfterSpaces: kernsAfterSpaces, at: CGPoint(x: x, y: baseline), in: context)
         context.restoreGState()
+    }
+
+    /// Draws `text` with its pen starting at `origin` (in the context's text space), shaped the way
+    /// the engine does: one run, or one run per word when it doesn't kern across spaces.
+    static func draw(_ text: String, font: NSFont, color: NSColor?, kernsAfterSpaces: Bool, at origin: CGPoint,
+                     in context: CGContext) {
+        var x = origin.x
+        for run in runs(text, kernsAfterSpaces: kernsAfterSpaces) {
+            let line = CTLineCreateWithAttributedString(attributed(run, font: font, color: color))
+            context.textPosition = CGPoint(x: x, y: origin.y)
+            CTLineDraw(line, context)
+            x += CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+        }
     }
 
     private func drawPill(_ content: GhostContent, in context: CGContext) {
@@ -173,27 +183,35 @@ final class GhostView: NSView {
 
     /// The typographic advance of `text`, unrounded: where the pen ends up after drawing it.
     static func exactWidth(of text: String, font: NSFont, kernsAfterSpaces: Bool = true) -> CGFloat {
-        let line = CTLineCreateWithAttributedString(attributed(text, font: font, color: nil, kernsAfterSpaces: kernsAfterSpaces))
-        return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+        runs(text, kernsAfterSpaces: kernsAfterSpaces).reduce(0) { total, run in
+            total + CGFloat(CTLineGetTypographicBounds(CTLineCreateWithAttributedString(attributed(run, font: font, color: nil)),
+                                                       nil, nil, nil))
+        }
     }
 
-    /// `text` styled for drawing. Without kerning after spaces, each space gets a zero kern, which
-    /// turns off the pair it would form with the next letter (the letter before it keeps its pair).
-    static func attributed(_ text: String, font: NSFont, color: NSColor?, kernsAfterSpaces: Bool) -> NSAttributedString {
+    static func attributed(_ text: String, font: NSFont, color: NSColor?) -> NSAttributedString {
         var attributes: [NSAttributedString.Key: Any] = [.font: font]
         if let color { attributes[.foregroundColor] = color }
-        let string = NSMutableAttributedString(string: text, attributes: attributes)
-        if !kernsAfterSpaces {
-            let ns = text as NSString
-            var index = 0
-            while index < ns.length {
-                let found = ns.range(of: " ", range: NSRange(location: index, length: ns.length - index))
-                guard found.location != NSNotFound else { break }
-                string.addAttribute(.kern, value: 0.0, range: found)
-                index = found.location + 1
+        return NSAttributedString(string: text, attributes: attributes)
+    }
+
+    /// The pieces an engine shapes separately. WebKit shapes each word together with the spaces after
+    /// it, so a letter kerns with a following space but a space never kerns with the next word.
+    static func runs(_ text: String, kernsAfterSpaces: Bool) -> [String] {
+        guard !kernsAfterSpaces, text.contains(" ") else { return [text] }
+        var runs: [String] = []
+        var current = ""
+        var previousWasSpace = false
+        for character in text {
+            if previousWasSpace && character != " " {
+                runs.append(current)
+                current = ""
             }
+            current.append(character)
+            previousWasSpace = character == " "
         }
-        return string
+        if !current.isEmpty { runs.append(current) }
+        return runs
     }
 
     /// How far kerning moves `next` when it follows `previous` (zero across a ligature, which can't be
@@ -202,7 +220,7 @@ final class GhostView: NSView {
         if previous == " " && !kernsAfterSpaces { return 0 }
         if previous.isWhitespace && previous != " " || next.isNewline || previous.isNewline { return 0 }
         let pair = String(previous) + String(next)
-        let line = CTLineCreateWithAttributedString(attributed(pair, font: font, color: nil, kernsAfterSpaces: kernsAfterSpaces))
+        let line = CTLineCreateWithAttributedString(attributed(pair, font: font, color: nil))
         guard CTLineGetGlyphCount(line) == pair.utf16.count else { return 0 }
         let kern = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
             - exactWidth(of: String(previous), font: font) - exactWidth(of: String(next), font: font)

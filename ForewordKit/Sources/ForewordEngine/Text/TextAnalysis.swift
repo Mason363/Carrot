@@ -71,7 +71,7 @@ public enum TextAnalysis {
     }
 
     @inline(__always)
-    static func isWordScalar(_ s: Unicode.Scalar) -> Bool {
+    public static func isWordScalar(_ s: Unicode.Scalar) -> Bool {
         // Emoji presentation selectors, the keycap mark and skin-tone modifiers belong to emoji.
         if s.properties.isVariationSelector || s.value == 0x20E3 || s.properties.isEmojiModifier { return false }
         if s.properties.isAlphabetic { return !isCJK(s) && !isUnspacedScript(s) }
