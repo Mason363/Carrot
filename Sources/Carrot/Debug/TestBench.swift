@@ -172,6 +172,9 @@ final class TestBenchController: NSObject, WKNavigationDelegate {
         case "suggest":
             SuggestionController.shared.debugSuggestNow()
             try? await Task.sleep(nanoseconds: UInt64((cmd["settle"] as? Double ?? 1.0) * 1e9))
+        case "force":
+            SuggestionController.shared.debugForce()
+            try? await Task.sleep(nanoseconds: UInt64((cmd["settle"] as? Double ?? 1.0) * 1e9))
         case "noteTyped":
             SuggestionController.shared.debugNoteKey(.text(cmd["text"] as? String ?? "x"))
             try? await Task.sleep(nanoseconds: UInt64((cmd["settle"] as? Double ?? 0.6) * 1e9))

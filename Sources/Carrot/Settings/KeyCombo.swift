@@ -20,6 +20,8 @@ struct KeyCombo: Codable, Equatable, Hashable {
     static let shiftTab = KeyCombo(keyCode: UInt16(kVK_Tab), modifiers: .shift)
     static let optionRight = KeyCombo(keyCode: UInt16(kVK_RightArrow), modifiers: .option)
     static let escape = KeyCombo(keyCode: UInt16(kVK_Escape))
+    /// ⌥\, the usual "suggest here" key of inline code completion.
+    static let optionBackslash = KeyCombo(keyCode: UInt16(kVK_ANSI_Backslash), modifiers: .option)
     static let rightArrow = KeyCombo(keyCode: UInt16(kVK_RightArrow))
 
     /// Matches a CGEvent's key code and flags.

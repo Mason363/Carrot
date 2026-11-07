@@ -616,7 +616,7 @@ public final class CompletionEngine: @unchecked Sendable {
         let completesWord = split.isMidWord && output.first.map({ !LlamaModel.isBoundaryByte($0) }) == true
         var firstThreshold = completesWord ? options.minWordCompletionProbability : options.minFirstWordProbability
         // One or two typed letters leave too many possible words: demand more certainty.
-        if split.isMidWord, let first = split.partialWord.unicodeScalars.first, !TextAnalysis.isCJK(first) {
+        if split.isMidWord, !options.forced, let first = split.partialWord.unicodeScalars.first, !TextAnalysis.isCJK(first) {
             let typed = split.partialWord.count
             if typed < 3 { firstThreshold += 0.14 * Double(3 - typed) }
         }
@@ -689,7 +689,7 @@ public final class CompletionEngine: @unchecked Sendable {
                   text.count >= 2 else { return nil }
             var threshold = options.minWordCompletionProbability
             if split.partialWord.count < 3 { threshold += 0.14 * Double(3 - split.partialWord.count) }
-            guard Double(joint) >= max(threshold, 0.35) else { return nil }
+            guard options.forced || Double(joint) >= max(threshold, 0.35) else { return nil }
             return Completion(text: text, kind: .insertion, probability: Double(joint),
                               firstWordProbability: Double(joint), fragmentProbability: 0)
         }

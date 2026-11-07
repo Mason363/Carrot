@@ -141,7 +141,7 @@ final class SuggestionController: ObservableObject {
 
     private func syncKeys() {
         tapState.setKeys(acceptAll: prefs.acceptAllKey, acceptWord: prefs.acceptWordKey,
-                         dismiss: prefs.dismissKey, toggle: prefs.toggleShortcut)
+                         dismiss: prefs.dismissKey, toggle: prefs.toggleShortcut, suggestNow: prefs.suggestNowKey)
     }
 
     // MARK: Event tap (tap thread)
@@ -180,6 +180,10 @@ final class SuggestionController: ObservableObject {
         keySequence += 1
         // A key decided against an older suggestion than the one showing now: whatever it did, the
         // newer one no longer matches what's on screen.
+        if outcome == .suggestNow {
+            forceSuggestion()
+            return
+        }
         if outcome != .toggle, let current = active, current.version != version {
             hide()
             noteWriting(kind)
@@ -193,6 +197,8 @@ final class SuggestionController: ObservableObject {
             return
         case .none:
             break
+        case .suggestNow:
+            return
         case .acceptAll, .acceptWord, .dismiss, .typedThrough, .diverged:
             // A decision made against an older suggestion: resync and hide to be safe.
             guard let current = active, current.version == version else {
@@ -322,6 +328,7 @@ final class SuggestionController: ObservableObject {
         currentAppName = info?.appName ?? NSWorkspace.shared.frontmostApplication?.localizedName
         fieldEligible = info.map(isEligible) ?? false
         currentFieldEligible = fieldEligible
+        tapState.setFieldActive(fieldEligible)
         assembler.reset()
         guard let info, fieldEligible else { return }
         beginJournalSession(info)
@@ -360,6 +367,7 @@ final class SuggestionController: ObservableObject {
             }
             fieldEligible = eligible
             currentFieldEligible = eligible
+            tapState.setFieldActive(eligible)
             writtenText = ""
             if eligible {
                 beginJournalSession(field)
@@ -574,8 +582,40 @@ final class SuggestionController: ObservableObject {
         return true
     }
 
-    private func request(for snapshot: FieldSnapshot) {
-        guard fieldEligible, let engine = models.engine, shouldRequest(snapshot) else { return }
+    /// Suggest-now shortcut: anywhere but inside a word, as long as there's something to go on
+    /// (text before the caret, or what's on screen around an empty reply).
+    private func mayForce(_ snapshot: FieldSnapshot) -> Bool {
+        if let next = snapshot.suffix.first, next.isLetter || next.isNumber,
+           let previous = snapshot.prefix.last, previous.isLetter || previous.isNumber { return false }
+        return !snapshot.prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !assembler.header.isEmpty
+    }
+
+    /// The suggest-now shortcut: read the field as it is and ask for the best guess, however unsure.
+    /// A beep says there's nothing to suggest here.
+    private func forceSuggestion() {
+        guard let field, fieldEligible, models.engine != nil else { NSSound.beep(); return }
+        hide()
+        suppressUntilBoundary = false
+        let cached = geometry
+        AXQueue.queue.async { [weak self] in
+            let snapshot = FieldReader.snapshot(of: field, cached: cached)
+            DispatchQueue.main.async {
+                guard let self, let snapshot, self.field == snapshot.info, !snapshot.hasSelection else {
+                    NSSound.beep()
+                    return
+                }
+                self.rememberGeometry(snapshot)
+                self.lastSnapshot = snapshot
+                self.request(for: snapshot, forced: true)
+            }
+        }
+    }
+
+    private func request(for snapshot: FieldSnapshot, forced: Bool = false) {
+        guard fieldEligible, let engine = models.engine, forced ? mayForce(snapshot) : shouldRequest(snapshot) else {
+            if forced { NSSound.beep() }
+            return
+        }
         assembler.refreshClipboard(fieldText: snapshot.prefix + snapshot.suffix)
         requestSerial += 1
         let serial = requestSerial
@@ -585,13 +625,17 @@ final class SuggestionController: ObservableObject {
         options.applyEagerness(prefs.eagerness + bias)
         options.length = prefs.length
         options.allowMidLine = prefs.midLineSuggestions
+        if forced { options.force() }
         var request = CompletionRequest(context: assembler.header, prefix: snapshot.prefix, suffix: snapshot.suffix, options: options)
         request.afterAcceptance = lastKey == .accept
         let eagerness = prefs.eagerness + bias
         Task { [weak self] in
             let result = await engine.complete(request)
             @MainActor func journal(_ outcome: String) {
-                self?.journalDecision(request, result: result, outcome: outcome, serial: serial, eagerness: eagerness)
+                self?.journalDecision(request, result: result, outcome: outcome, serial: serial, eagerness: eagerness,
+                                      forced: forced)
+                // Asked for and nothing came: say so.
+                if forced, ["none", "non-word", "not shown"].contains(outcome) { NSSound.beep() }
             }
             if TestBench.isDebugging {
                 let line = "request …\(request.prefix.suffix(40).debugDescription) → \(result.map { "\($0.text.debugDescription) p=\(String(format: "%.2f", $0.probability)) \(Int($0.milliseconds))ms" } ?? "nil")\n"
@@ -855,12 +899,13 @@ final class SuggestionController: ObservableObject {
     }
 
     private func journalDecision(_ request: CompletionRequest, result: Completion?, outcome: String, serial: Int,
-                                 eagerness: Double) {
+                                 eagerness: Double, forced: Bool) {
         // A field that became usable later (model loaded, pause ended, journal switched on).
         if journaling, journalSession == nil, let field, fieldEligible { beginJournalSession(field) }
         guard journaling, let session = journalSession else { return }
         var detail: [String: Any] = ["outcome": outcome, "serial": serial, "eagerness": eagerness,
                                      "afterAccept": request.afterAcceptance]
+        if forced { detail["forced"] = true }
         if let result {
             detail["p"] = result.probability
             detail["first"] = result.firstWordProbability
@@ -1009,6 +1054,11 @@ final class SuggestionController: ObservableObject {
     }
 
     /// Debug: show `text` as the suggestion at the field's caret, without asking the model.
+    /// Test bench: what the suggest-now shortcut does.
+    func debugForce() {
+        forceSuggestion()
+    }
+
     func debugShowGhost(_ text: String) {
         guard let field else { return }
         AXQueue.queue.async { [weak self] in

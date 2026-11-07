@@ -52,6 +52,12 @@ final class Preferences: ObservableObject {
     @Published var acceptWordKey: KeyCombo { didSet { save(acceptWordKey, "acceptWordKey") } }
     @Published var dismissKey: KeyCombo { didSet { save(dismissKey, "dismissKey") } }
     @Published var toggleShortcut: KeyCombo? { didSet { save(toggleShortcut, "toggleShortcut") } }
+    /// Asks for a suggestion right away (nil: off). Saved as empty data when switched off.
+    @Published var suggestNowKey: KeyCombo? {
+        didSet {
+            if let suggestNowKey { save(suggestNowKey, "suggestNowKey") } else { defaults.set(Data(), forKey: "suggestNowKey") }
+        }
+    }
     @Published var typoCorrection: Bool { didSet { defaults.set(typoCorrection, forKey: "typoCorrection") } }
     @Published var midLineSuggestions: Bool { didSet { defaults.set(midLineSuggestions, forKey: "midLineSuggestions") } }
     @Published var ghostColor: GhostColor { didSet { defaults.set(ghostColor.rawValue, forKey: "ghostColor") } }
@@ -97,6 +103,11 @@ final class Preferences: ObservableObject {
         acceptAllKey = acceptAll
         acceptWordKey = acceptWord
         dismissKey = Self.load("dismissKey", defaults) ?? .escape
+        if let data = defaults.data(forKey: "suggestNowKey") {
+            suggestNowKey = data.isEmpty ? nil : (try? JSONDecoder().decode(KeyCombo.self, from: data)) ?? .optionBackslash
+        } else {
+            suggestNowKey = .optionBackslash
+        }
         // A global shortcut without ⌘, ⌃ or ⌥ (an older recorder could save a bare Esc) eats normal typing.
         let savedToggle: KeyCombo? = Self.load("toggleShortcut", defaults)
         toggleShortcut = savedToggle.flatMap { $0.modifierFlags.intersection([.command, .control, .option]).isEmpty ? nil : $0 }

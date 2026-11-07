@@ -24,6 +24,8 @@ enum TapOutcome: Equatable {
     case typedThrough(String)
     case diverged
     case toggle
+    /// Ask for a suggestion now.
+    case suggestNow
 }
 
 /// The slice of suggestion state the event-tap thread needs to make instant decisions.
@@ -39,13 +41,22 @@ final class TapState: @unchecked Sendable {
     private var acceptWordKey = KeyCombo.tab
     private var dismissKey = KeyCombo.escape
     private var toggleKey: KeyCombo?
+    private var suggestNowKey: KeyCombo?
+    /// Suggestions run in the focused field (only then is the suggest-now key taken over).
+    private var fieldActive = false
 
-    func setKeys(acceptAll: KeyCombo, acceptWord: KeyCombo, dismiss: KeyCombo, toggle: KeyCombo?) {
+    func setKeys(acceptAll: KeyCombo, acceptWord: KeyCombo, dismiss: KeyCombo, toggle: KeyCombo?, suggestNow: KeyCombo?) {
         lock.lock(); defer { lock.unlock() }
         acceptAllKey = acceptAll
         acceptWordKey = acceptWord
         dismissKey = dismiss
         toggleKey = toggle
+        suggestNowKey = suggestNow
+    }
+
+    func setFieldActive(_ active: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        fieldActive = active
     }
 
     /// Main thread: publish the currently shown suggestion. Returns the new version.
@@ -76,6 +87,10 @@ final class TapState: @unchecked Sendable {
         let basedOn = version
         if let toggleKey, toggleKey.matches(keyCode: keyCode, flags: flags) {
             return (true, .toggle, kind, basedOn)
+        }
+        if fieldActive, let suggestNowKey, suggestNowKey.matches(keyCode: keyCode, flags: flags) {
+            visible = false
+            return (true, .suggestNow, .other, basedOn)
         }
         guard visible else { return (false, .none, kind, basedOn) }
         if acceptAllKey.matches(keyCode: keyCode, flags: flags) {

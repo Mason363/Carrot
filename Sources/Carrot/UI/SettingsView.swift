@@ -214,18 +214,19 @@ struct GhostPreview: View {
 struct KeyboardSettings: View {
     @ObservedObject private var prefs = Preferences.shared
     private var toggle: [KeyCombo] { prefs.toggleShortcut.map { [$0] } ?? [] }
+    private var suggestNow: [KeyCombo] { prefs.suggestNowKey.map { [$0] } ?? [] }
 
     var body: some View {
         Form {
             Section {
                 LabeledContent("Accept next word") {
-                    KeyRecorder(combo: $prefs.acceptWordKey, taken: [prefs.acceptAllKey, prefs.dismissKey] + toggle)
+                    KeyRecorder(combo: $prefs.acceptWordKey, taken: [prefs.acceptAllKey, prefs.dismissKey] + toggle + suggestNow)
                 }
                 LabeledContent("Accept whole suggestion") {
-                    KeyRecorder(combo: $prefs.acceptAllKey, taken: [prefs.acceptWordKey, prefs.dismissKey] + toggle)
+                    KeyRecorder(combo: $prefs.acceptAllKey, taken: [prefs.acceptWordKey, prefs.dismissKey] + toggle + suggestNow)
                 }
                 LabeledContent("Dismiss") {
-                    KeyRecorder(combo: $prefs.dismissKey, acceptsEscape: true, taken: [prefs.acceptWordKey, prefs.acceptAllKey] + toggle)
+                    KeyRecorder(combo: $prefs.dismissKey, acceptsEscape: true, taken: [prefs.acceptWordKey, prefs.acceptAllKey] + toggle + suggestNow)
                 }
                 Toggle("Include punctuation when accepting a word", isOn: $prefs.wordIncludesPunctuation)
             } footer: {
@@ -238,7 +239,7 @@ struct KeyboardSettings: View {
                         KeyRecorder(combo: Binding(get: { prefs.toggleShortcut ?? KeyCombo(keyCode: 0xFFFF) },
                                                    set: { prefs.toggleShortcut = $0 }),
                                     allowsNone: true, isNone: prefs.toggleShortcut == nil, requiresModifier: true,
-                                    taken: [prefs.acceptWordKey, prefs.acceptAllKey, prefs.dismissKey])
+                                    taken: [prefs.acceptWordKey, prefs.acceptAllKey, prefs.dismissKey] + suggestNow)
                         if prefs.toggleShortcut != nil {
                             Button { prefs.toggleShortcut = nil } label: { Image(systemName: "xmark.circle.fill") }
                                 .buttonStyle(.borderless)
@@ -246,8 +247,21 @@ struct KeyboardSettings: View {
                         }
                     }
                 }
+                LabeledContent("Suggest now") {
+                    HStack {
+                        KeyRecorder(combo: Binding(get: { prefs.suggestNowKey ?? KeyCombo(keyCode: 0xFFFF) },
+                                                   set: { prefs.suggestNowKey = $0 }),
+                                    allowsNone: true, isNone: prefs.suggestNowKey == nil, requiresModifier: true,
+                                    taken: [prefs.acceptWordKey, prefs.acceptAllKey, prefs.dismissKey] + toggle)
+                        if prefs.suggestNowKey != nil {
+                            Button { prefs.suggestNowKey = nil } label: { Image(systemName: "xmark.circle.fill") }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
             } footer: {
-                Text("Works everywhere. Use a combination with ⌘, ⌃ or ⌥ so it doesn't get in the way of typing.")
+                Text("Turning suggestions on or off works everywhere. Suggest now asks for a suggestion right away, even where Carrot would stay quiet, and is only taken over in fields Carrot works in. Use a combination with ⌘, ⌃ or ⌥ so they don't get in the way of typing.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {
@@ -257,6 +271,7 @@ struct KeyboardSettings: View {
                     prefs.wordIncludesPunctuation = false
                     prefs.dismissKey = .escape
                     prefs.toggleShortcut = nil
+                    prefs.suggestNowKey = .optionBackslash
                 }
             }
         }

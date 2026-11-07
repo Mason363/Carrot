@@ -8,7 +8,7 @@
 
 ---
 
-Carrot suggests the rest of your sentence as you type — in Mail, Messages, Slack, Notion, Obsidian, Google Docs, or any other text field — and shows it as gray text right where you're writing. Press <kbd>Tab</kbd> to take it a word at a time, <kbd>⇧</kbd><kbd>Tab</kbd> to take all of it, or just keep typing.
+Carrot suggests the rest of your sentence as you type — in Mail, Messages, Slack, Notion, Obsidian, Google Docs, or any other text field — and shows it as gray text right where you're writing. Press <kbd>Tab</kbd> to take it a word at a time, <kbd>⇧</kbd><kbd>Tab</kbd> to take all of it, or just keep typing. Where it stays quiet, <kbd>⌥</kbd><kbd>\\</kbd> asks for its best guess anyway.
 
 It runs a small language model on your Mac's GPU. There's no account, no subscription, no usage limit, and nothing you type is ever sent anywhere.
 

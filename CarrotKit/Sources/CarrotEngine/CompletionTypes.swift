@@ -65,12 +65,26 @@ public struct CompletionOptions: Sendable, Equatable {
     /// cut's value is the characters a user would likely accept minus this much per character
     /// likely to be wrong (0: the longest phrase the thresholds allow).
     public var wrongCharacterCost: Double = 0
+    /// The user asked for a suggestion (a shortcut): show the best guess, however unsure.
+    public var forced = false
     /// Allow suggestions when there is text after the cursor on the same line.
     public var allowMidLine = true
     /// Penalise verbatim repetition of the user's own text.
     public var repetitionGuard = true
 
     public init() {}
+
+    /// A suggestion on request: the most eager phrasing, and no bar for whether it's worth showing.
+    public mutating func force() {
+        applyEagerness(1)
+        forced = true
+        minFirstWordProbability = 0
+        minWordCompletionProbability = 0
+        minExpectedCharacters = 0
+        minFillerProbability = 0
+        minNewWordProbability = 0
+        allowMidLine = true
+    }
 
     /// Maps a 0…1 "eagerness" slider onto the thresholds (0 = conservative, 1 = eager).
     /// Tuned with `carrot-eval sim`: 0.5 keeps ~77% of shown suggestions right on the first word
