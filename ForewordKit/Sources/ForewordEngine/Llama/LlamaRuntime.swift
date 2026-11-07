@@ -31,6 +31,7 @@ public enum LlamaError: Error, CustomStringConvertible {
     case decodeFailed(Int32)
     case tokenizationFailed
     case cancelled
+    case emptyPrompt
 
     public var description: String {
         switch self {
@@ -39,6 +40,7 @@ public enum LlamaError: Error, CustomStringConvertible {
         case .decodeFailed(let code): return "Decode failed (\(code))"
         case .tokenizationFailed: return "Tokenization failed"
         case .cancelled: return "Cancelled"
+        case .emptyPrompt: return "Nothing to evaluate"
         }
     }
 }

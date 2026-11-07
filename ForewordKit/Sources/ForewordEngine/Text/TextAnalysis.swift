@@ -23,9 +23,18 @@ public enum TextAnalysis {
         var i = scalars.count
         var wordLength = 0
 
-        // A single trailing CJK character is its own "word".
-        if i > 0, isCJK(scalars[i - 1]) {
-            i -= 1
+        // A single trailing CJK character (or one unspaced-script grapheme) is its own "word"; the
+        // space before it, if any, goes with it like for any other word.
+        if i > 0, isCJK(scalars[i - 1]) || isUnspacedScript(scalars[i - 1]) {
+            if isCJK(scalars[i - 1]) {
+                i -= 1
+            } else {
+                // Thai, Lao, Khmer, Myanmar: one grapheme (base plus marks).
+                while i > 0, scalars[i - 1].properties.generalCategory == .nonspacingMark
+                    || scalars[i - 1].properties.generalCategory == .spacingMark { i -= 1 }
+                if i > 0 { i -= 1 }
+            }
+            while i > 0, scalars[i - 1] == " " || scalars[i - 1] == "\t" || scalars[i - 1] == "\u{00A0}" { i -= 1 }
             let stable = String(String.UnicodeScalarView(scalars[0..<i]))
             let fragment = String(String.UnicodeScalarView(scalars[i...]))
             return PrefixSplit(stable: stable, fragment: fragment, isMidWord: true, isSuspicious: false)
@@ -63,10 +72,23 @@ public enum TextAnalysis {
 
     @inline(__always)
     static func isWordScalar(_ s: Unicode.Scalar) -> Bool {
-        if s.properties.isAlphabetic { return !isCJK(s) }
+        // Emoji presentation selectors, the keycap mark and skin-tone modifiers belong to emoji.
+        if s.properties.isVariationSelector || s.value == 0x20E3 || s.properties.isEmojiModifier { return false }
+        if s.properties.isAlphabetic { return !isCJK(s) && !isUnspacedScript(s) }
         switch s.properties.generalCategory {
         case .decimalNumber, .nonspacingMark, .spacingMark, .enclosingMark, .connectorPunctuation:
-            return s != "_"
+            return s != "_" && !isUnspacedScript(s)
+        default:
+            return false
+        }
+    }
+
+    /// Scripts written without spaces between words (Thai, Lao, Myanmar, Khmer): like CJK, each
+    /// character stands on its own for completion purposes.
+    public static func isUnspacedScript(_ s: Unicode.Scalar) -> Bool {
+        switch s.value {
+        case 0x0E00...0x0EFF, 0x1000...0x109F, 0x1780...0x17FF, 0x19E0...0x19FF, 0xAA60...0xAA7F, 0xA9E0...0xA9FF:
+            return true
         default:
             return false
         }
@@ -95,12 +117,14 @@ public enum TextAnalysis {
         "because", "about", "into", "very", "really", "just", "will", "would", "can", "could", "should",
         "have", "has", "had", "do", "does", "this", "these", "those", "some", "any", "more", "most",
         "y", "o", "el", "la", "los", "las", "de", "en", "un", "una", "que", "le", "les", "et", "der", "die", "das", "und",
+        "i'm", "i'll", "i've", "i'd", "we're", "we'll", "we've", "you're", "you'll", "they're", "they'll", "it's",
+        "that's", "there's", "he's", "she's", "let's",
     ]
 
     /// Whether `text` ends on a word a suggestion shouldn't stop at.
     public static func endsDangling(_ text: String) -> Bool {
         guard let last = text.split(whereSeparator: { $0.isWhitespace }).last else { return false }
-        return danglingWords.contains(last.lowercased())
+        return danglingWords.contains(last.lowercased().replacingOccurrences(of: "\u{2019}", with: "'"))
     }
 
     /// Sentence-ending punctuation (Latin and CJK).
@@ -138,7 +162,8 @@ public enum TextAnalysis {
 
     /// The part of `suffix` up to the end of its first line.
     public static func lineSuffix(_ suffix: String) -> Substring {
-        if let nl = suffix.firstIndex(where: { $0 == "\n" || $0 == "\r" || $0 == "\u{2028}" || $0 == "\u{2029}" }) {
+        // `isNewline` also covers "\r\n", which Swift treats as one character.
+        if let nl = suffix.firstIndex(where: { $0.isNewline }) {
             return suffix[..<nl]
         }
         return suffix[...]

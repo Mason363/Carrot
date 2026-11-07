@@ -72,10 +72,12 @@ final class LlamaContext {
     }
 
     /// Makes sequence 0 hold exactly `prompt` and returns the logits for its last token.
-    func evaluate(_ prompt: [Int32], cancelled: () -> Bool) throws -> UnsafeMutablePointer<Float> {
-        precondition(!prompt.isEmpty)
+    /// `reusableUpTo` marks where the part of the prompt the next request is likely to share ends
+    /// (recurrent models checkpoint there instead of at the end).
+    func evaluate(_ prompt: [Int32], reusableUpTo: Int? = nil, cancelled: () -> Bool) throws -> UnsafeMutablePointer<Float> {
+        guard !prompt.isEmpty else { throw LlamaError.emptyPrompt }
         if model.isRecurrent {
-            return try evaluateRecurrent(prompt, cancelled: cancelled)
+            return try evaluateRecurrent(prompt, reusableUpTo: reusableUpTo, cancelled: cancelled)
         }
         var keep = commonPrefixLength(tokens, prompt)
         if keep == prompt.count { keep -= 1 } // need fresh logits for the last token
@@ -95,8 +97,10 @@ final class LlamaContext {
         checkpoint.count <= limit && commonPrefixLength(checkpoint, prompt) == checkpoint.count
     }
 
-    private func evaluateRecurrent(_ prompt: [Int32], cancelled: () -> Bool) throws -> UnsafeMutablePointer<Float> {
-        let target = prompt.count - 1 // the last token is decoded in seq 0 for logits
+    private func evaluateRecurrent(_ prompt: [Int32], reusableUpTo: Int?, cancelled: () -> Bool) throws -> UnsafeMutablePointer<Float> {
+        // The head is checkpointed just before the last token (decoded in seq 0 for logits), or at the
+        // end of the shared part when the rest will differ next time (text after a mid-line caret).
+        let target = min(prompt.count - 1, max(0, reusableUpTo ?? prompt.count - 1))
         let head = Self.checkpointSeqs[0], near = Self.checkpointSeqs[1], far = Self.checkpointSeqs[2]
 
         // Invalidate checkpoints that no longer match.
@@ -104,6 +108,10 @@ final class LlamaContext {
             llama_memory_seq_rm(memory, Self.checkpointSeqs[i], -1, -1)
             checkpoints[i] = []
         }
+        // The working sequence is rebuilt from the head below; free it now so the cache cells it
+        // alone holds (the previous prompt and its output) don't crowd out the head's advance.
+        llama_memory_seq_rm(memory, Self.workSeq, -1, -1)
+        tokens = []
         // Make the head the best starting point.
         if checkpoints[0].isEmpty {
             if checkpoints[1].count >= checkpoints[2].count, !checkpoints[1].isEmpty {
@@ -125,18 +133,23 @@ final class LlamaContext {
             if !checkpoints[0].isEmpty { llama_memory_seq_cp(memory, head, near, -1, -1) }
             checkpoints[1] = checkpoints[0]
         }
-        // Advance the head to just before the end of the prompt.
-        if target > checkpoints[0].count {
-            let extra = Array(prompt[checkpoints[0].count..<target])
+        // Advance the head, one batch at a time. A batch that completed stays in the checkpoint even
+        // if a newer request cancels the rest: the next request continues from there.
+        while target > checkpoints[0].count {
+            let start = checkpoints[0].count
+            let chunk = Array(prompt[start..<min(target, start + batchSize)])
             do {
-                _ = try decode(extra, seq: head, startPos: checkpoints[0].count, wantLogits: false,
-                               cancelled: cancelled, track: false)
+                _ = try decode(chunk, seq: head, startPos: start, wantLogits: false, cancelled: cancelled, track: false)
+            } catch LlamaError.cancelled {
+                throw LlamaError.cancelled
             } catch {
-                llama_memory_seq_rm(memory, head, -1, -1)
-                checkpoints[0] = []
+                if case LlamaError.decodeFailed(1) = error {} else {
+                    llama_memory_seq_rm(memory, head, -1, -1)
+                    checkpoints[0] = []
+                }
                 throw error
             }
-            checkpoints[0].append(contentsOf: extra)
+            checkpoints[0].append(contentsOf: chunk)
         }
         // Rebuild the working sequence from the head.
         llama_memory_seq_rm(memory, Self.workSeq, -1, -1)
@@ -187,6 +200,10 @@ final class LlamaContext {
             }
             if offset + n == input.count && wantLogits { batch.logits[n - 1] = 1 }
             let status = llama_decode(pointer, batch)
+            if status == 1 {
+                // No room for the batch; llama.cpp leaves memory as it was, so checkpoints stay valid.
+                throw LlamaError.decodeFailed(status)
+            }
             if status != 0 {
                 // Memory may be partially updated; start clean next time.
                 reset()

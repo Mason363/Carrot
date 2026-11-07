@@ -186,7 +186,7 @@ public final class CompletionEngine: @unchecked Sendable {
 
     /// Fill-in-the-middle prompt: <pre> header + text before <suf> text after <mid>.
     private func fimPromptTokens(header: String, stable: String, suffix: String,
-                                 fim: (prefix: Int32, suffix: Int32, middle: Int32)) -> (tokens: [Int32], document: [Int32]) {
+                                 fim: (prefix: Int32, suffix: Int32, middle: Int32)) -> (tokens: [Int32], document: [Int32], shared: Int) {
         var (headerTokens, doc) = promptParts(header: header, stable: stable)
         var bos: [Int32] = []
         if model.addBOS, headerTokens.first == model.bosToken {
@@ -197,7 +197,8 @@ public final class CompletionEngine: @unchecked Sendable {
         }
         let after = model.tokenize(String(suffix.prefix(400)), addSpecial: false)
         let tokens = bos + [fim.prefix] + headerTokens + doc + [fim.suffix] + after + [fim.middle]
-        return (tokens, doc)
+        // Everything up to the end of the document is what the next keystroke's prompt shares.
+        return (tokens, doc, bos.count + 1 + headerTokens.count + doc.count)
     }
 
     // MARK: Decoding
@@ -230,13 +231,17 @@ public final class CompletionEngine: @unchecked Sendable {
             return nil
         }
         let closer = midLine ? nil : lineSuffix.first(where: { !$0.isWhitespace })
+        let trimmedSuffix = lineSuffix.drop(while: { $0.isWhitespace })
+        let suffixHead: String? = midLine && trimmedSuffix.count >= 4 ? String(trimmedSuffix.prefix(10)) : nil
 
         let prompt: [Int32]
         var history: [Int32]
+        var reusable: Int?
         let usesFIM = midLine && model.fim != nil
         if midLine, let fim = model.fim {
             let built = fimPromptTokens(header: request.context, stable: split.stable, suffix: request.suffix, fim: fim)
             prompt = built.tokens
+            reusable = built.shared
             history = Array(built.document.suffix(512))
         } else {
             let parts = promptParts(header: request.context, stable: split.stable)
@@ -244,7 +249,7 @@ public final class CompletionEngine: @unchecked Sendable {
             history = Array(parts.document.suffix(512))
         }
         let reusedBefore = context.stats.promptTokensReused
-        var logitsPointer = try context.evaluate(prompt, cancelled: { !isCurrent() })
+        var logitsPointer = try context.evaluate(prompt, reusableUpTo: reusable, cancelled: { !isCurrent() })
         let reused = context.stats.promptTokensReused - reusedBefore
         defer { context.truncate(to: prompt.count) }
 
@@ -278,7 +283,9 @@ public final class CompletionEngine: @unchecked Sendable {
                 // " a" + "t…" (an unnatural path that derails the model).
                 var allowed = model.tokensCompatible(with: required)
                 let canonical = model.tokenize(String(decoding: required, as: UTF8.self), addSpecial: false)
-                if let first = canonical.first {
+                // (Not for runs of spaces: in context "  The" is " " + " The", not "  " + "The".)
+                let onlySpaces = required.allSatisfy { $0 == 0x20 || $0 == 0x09 }
+                if !onlySpaces, let first = canonical.first {
                     let minLength = model.pieceRange(first).count
                     let filtered = allowed.filter { model.pieceRange($0).count >= minLength }
                     if !filtered.isEmpty { allowed = filtered }
@@ -340,10 +347,11 @@ public final class CompletionEngine: @unchecked Sendable {
                 }
                 if freeSteps >= generationBudget {
                     // Copying something verbatim (a link, an address) is cheap and certain: let it finish.
-                    let copying = steps.suffix(3).allSatisfy { $0.probability >= 0.9 } && probability >= 0.9
+                    // (Not mid-line, where the model happily copies the text after the caret.)
+                    let copying = !midLine && steps.suffix(3).allSatisfy { $0.probability >= 0.9 } && probability >= 0.9
                     if !(copying && freeSteps < generationBudget * 2 + 8) {
                         stop = .tokens
-                        lastWordComplete = boundary || flags.contains(.containsNewline)
+                        lastWordComplete = completesWord(after: output, next: token)
                         break decodeLoop
                     }
                 }
@@ -356,7 +364,7 @@ public final class CompletionEngine: @unchecked Sendable {
                 let tokenFloor = withinTarget ? options.minPhraseTokenProbability : options.minTokenProbability
                 if !midLine && (Double(probability) < tokenFloor || Double(prospectiveJoint) < jointFloor) {
                     stop = .lowConfidence
-                    lastWordComplete = boundary || flags.contains(.containsNewline)
+                    lastWordComplete = completesWord(after: output, next: token)
                     break decodeLoop
                 }
                 let piece = model.piece(token)
@@ -371,8 +379,9 @@ public final class CompletionEngine: @unchecked Sendable {
                     lastWordComplete = true
                     break decodeLoop
                 }
-                if let closer, let text = String(bytes: piece, encoding: .utf8), text.contains(closer) {
-                    let before = text[..<text.firstIndex(of: closer)!]
+                if let closer, let text = String(bytes: piece, encoding: .utf8), let at = text.firstIndex(of: closer),
+                   !Self.isContraction(closer, in: text, at: at, after: output) {
+                    let before = text[..<at]
                     if !before.isEmpty {
                         output.append(contentsOf: Array(before.utf8))
                         steps.append(Step(token: token, end: output.count, probability: probability, constrained: false))
@@ -388,7 +397,8 @@ public final class CompletionEngine: @unchecked Sendable {
                     lastWordComplete = true
                     break decodeLoop
                 }
-                if !midLine, boundary, TextAnalysis.wordCount(String(decoding: output, as: UTF8.self)) >= options.length.maxWords {
+                if !midLine, completesWord(after: output, next: token),
+                   TextAnalysis.wordCount(String(decoding: output, as: UTF8.self)) >= options.length.maxWords {
                     stop = .words
                     lastWordComplete = true
                     break decodeLoop
@@ -396,6 +406,14 @@ public final class CompletionEngine: @unchecked Sendable {
                 output.append(contentsOf: piece)
                 steps.append(Step(token: token, end: output.count, probability: probability, constrained: false))
                 freeSteps += 1
+                // Mid-line, once the output has rejoined the text after the caret the rest is a copy.
+                if midLine, let head = suffixHead, String(decoding: output, as: UTF8.self).contains(head) {
+                    stop = .closer
+                    lastWordComplete = true
+                    history.append(token)
+                    runningJoint *= probability
+                    break decodeLoop
+                }
 
                 // Sentence end? CJK terminators end immediately; Latin ones need a following boundary.
                 if let text = String(bytes: piece, encoding: .utf8), let last = text.last, TextAnalysis.isSentenceEnd(last) {
@@ -490,6 +508,49 @@ public final class CompletionEngine: @unchecked Sendable {
 
     private static var danglingWords: Set<String> { TextAnalysis.danglingWords }
 
+    /// Whether the text so far ends a word, given the token that would come next: a space, a line
+    /// break, the end, closing punctuation, or a move into or out of CJK text. Other punctuation
+    /// only if a space follows it ("example.com", "don't" and "3.5" are one word).
+    private func completesWord(after output: [UInt8], next token: Int32) -> Bool {
+        let flags = model.flags[Int(token)]
+        if flags.contains(.endOfGeneration) || flags.contains(.containsNewline) { return true }
+        let piece = model.piece(token)
+        guard let first = piece.first else { return true }
+        if first == 0x20 || first == 0x09 { return true }
+        if Self.closingPunctuation.contains(first) { return true }
+        if Self.isCJKBoundary(output + piece, at: output.count) { return true }
+        if first == 0x2E || first == 0x21 || first == 0x3F {
+            // A period after a plain word ends it; inside a link, an address or a number it doesn't.
+            let word = output.reversed().prefix(while: { $0 != 0x20 && $0 != 0x09 && $0 != 0x0A })
+            let linkish = word.contains { $0 == 0x2F || $0 == 0x40 || $0 == 0x2E || $0 == 0x3A }
+            let numeric = word.first.map { $0 >= 0x30 && $0 <= 0x39 } ?? false
+            if !linkish && !numeric { return true }
+        }
+        if flags.contains(.boundaryBefore) { return Self.isWordEnd(output: output + piece, at: output.count, outputComplete: false) }
+        return false
+    }
+
+    private static let closingPunctuation: Set<UInt8> = Set(",;:!?)]}\"".utf8)
+
+    /// A move into or out of CJK text (characters or punctuation) at byte `index` of `output`.
+    static func isCJKBoundary(_ output: [UInt8], at index: Int) -> Bool {
+        guard index > 0, index < output.count else { return false }
+        let before = String(decoding: output[..<index].suffix(4), as: UTF8.self).unicodeScalars.last
+        let after = String(decoding: output[index...].prefix(4), as: UTF8.self).unicodeScalars.first
+        guard let before, let after, before != "\u{FFFD}", after != "\u{FFFD}" else { return false }
+        return TextAnalysis.isCJK(before) || TextAnalysis.isCJK(after)
+    }
+
+    /// An apostrophe between letters ("don't") rather than a closing quote.
+    static func isContraction(_ closer: Character, in text: String, at index: String.Index, after output: [UInt8]) -> Bool {
+        guard closer == "'" || closer == "\u{2019}" else { return false }
+        let previous: Character? = index > text.startIndex ? text[text.index(before: index)]
+            : String(decoding: output.suffix(4), as: UTF8.self).last
+        let nextIndex = text.index(after: index)
+        let next: Character? = nextIndex < text.endIndex ? text[nextIndex] : nil
+        return (previous?.isLetter ?? false) && (next?.isLetter ?? true)
+    }
+
     /// Picks the longest prefix of the generated text that ends on a word boundary and that the
     /// model is confident about.
     private func selectContinuation(output: [UInt8], steps: [Step], lastWordComplete: Bool, split: PrefixSplit,
@@ -519,8 +580,10 @@ public final class CompletionEngine: @unchecked Sendable {
                 nextStartsWord = lastWordComplete
             } else {
                 let next = steps[i + 1]
-                nextStartsWord = model.flags[Int(next.token)].contains(.boundaryBefore) && !next.constrained
-                    && Self.isWordEnd(output: output, at: step.end, outputComplete: lastWordComplete)
+                nextStartsWord = !next.constrained
+                    && ((model.flags[Int(next.token)].contains(.boundaryBefore)
+                         && Self.isWordEnd(output: output, at: step.end, outputComplete: lastWordComplete))
+                        || Self.isCJKBoundary(output, at: step.end))
             }
             guard nextStartsWord, step.end > 0 else { continue }
             let text = String(decoding: output[..<step.end], as: UTF8.self)
@@ -555,7 +618,7 @@ public final class CompletionEngine: @unchecked Sendable {
         guard Double(firstWord) >= firstThreshold else { return nil }
 
         // Don't leave the user hanging on "…and", "…the", "…I am".
-        while cuts.count > 1, Self.danglingWords.contains(cuts[cuts.count - 1].lastWord) {
+        while cuts.count > 1, TextAnalysis.endsDangling(cuts[cuts.count - 1].lastWord) {
             cuts.removeLast()
         }
         var best = cuts[cuts.count - 1]
