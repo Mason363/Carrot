@@ -354,11 +354,15 @@ final class SuggestionController: ObservableObject {
         guard let field else { return }
         let eligible = isEligible(field)
         if eligible != fieldEligible {
-            if !eligible { commitMemory() } // what was written before the pause
+            if !eligible {
+                endJournalSession()
+                commitMemory() // what was written before the pause
+            }
             fieldEligible = eligible
             currentFieldEligible = eligible
             writtenText = ""
             if eligible {
+                beginJournalSession(field)
                 assembler.prepare(for: field, snapshot: lastSnapshot)
                 prefillCurrent()
             } else {
@@ -852,6 +856,8 @@ final class SuggestionController: ObservableObject {
 
     private func journalDecision(_ request: CompletionRequest, result: Completion?, outcome: String, serial: Int,
                                  eagerness: Double) {
+        // A field that became usable later (model loaded, pause ended, journal switched on).
+        if journaling, journalSession == nil, let field, fieldEligible { beginJournalSession(field) }
         guard journaling, let session = journalSession else { return }
         var detail: [String: Any] = ["outcome": outcome, "serial": serial, "eagerness": eagerness,
                                      "afterAccept": request.afterAcceptance]
