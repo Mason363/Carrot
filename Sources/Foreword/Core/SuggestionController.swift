@@ -273,12 +273,17 @@ final class SuggestionController: ObservableObject {
             var info: FieldInfo?
             var changed = false
             var definite = true
+            var docsHint: CGRect?
             if element != current {
                 changed = true
                 info = element.flatMap(FieldReader.info(for:))
                 // Nil can mean "not a text field" or "the app didn't answer in time"; only the first
                 // is worth remembering, or a slow app would never get suggestions in this field.
                 if info == nil, let element { definite = element.role != nil }
+                // Google Docs without its braille support exposes no text at all: say how to fix that.
+                if info == nil, let element, Self.mayShowDocsHint(), FieldReader.isUnreadableGoogleDocs(element) {
+                    docsHint = FieldReader.googleDocsCaretRect(near: element) ?? element.window?.frame
+                }
             }
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -287,8 +292,19 @@ final class SuggestionController: ObservableObject {
                     self.lastFocusedElement = definite ? element : nil
                     if info != self.field || info == nil { self.setField(info) }
                 }
+                if let rect = docsHint, self.prefs.isActive, self.prefs.isAppEnabled(NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
+                    UserDefaults.standard.set(Date(), forKey: "docsHintShown")
+                    self.presenter.showNotice("For suggestions in Google Docs, turn on screen reader and braille support in Tools › Accessibility.",
+                                              below: rect.height > 200 ? CGRect(x: rect.midX - 200, y: rect.minY + 120, width: 0, height: 20) : rect)
+                }
             }
         }
+    }
+
+    /// The Google Docs hint shows at most once a day.
+    nonisolated static func mayShowDocsHint() -> Bool {
+        guard let last = UserDefaults.standard.object(forKey: "docsHintShown") as? Date else { return true }
+        return Date().timeIntervalSince(last) > 86_400
     }
 
     private func setField(_ info: FieldInfo?) {
@@ -898,6 +914,19 @@ final class SuggestionController: ObservableObject {
                 self.lastSnapshot = snapshot
                 self.hide()
                 self.request(for: snapshot)
+            }
+        }
+    }
+
+    /// Debug: show `text` as the suggestion at the field's caret, without asking the model.
+    func debugShowGhost(_ text: String) {
+        guard let field else { return }
+        AXQueue.queue.async { [weak self] in
+            let snapshot = FieldReader.snapshot(of: field)
+            DispatchQueue.main.async {
+                guard let self, let snapshot else { return }
+                self.lastSnapshot = snapshot
+                _ = self.presenter.show(text, snapshot: snapshot, preferPill: false)
             }
         }
     }

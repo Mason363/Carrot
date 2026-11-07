@@ -81,6 +81,8 @@ The "How often" slider in Settings moves between these points.
 
 ## Known limitations
 
+- Google Docs draws its text on a canvas and only shares it with other apps when its own accessibility support is on: in a document, turn on **Tools › Accessibility › Turn on screen reader support** and **Turn on braille support**. Foreword shows a reminder in Docs when they're off.
+
 - Foreword needs the app to report where the text cursor is. Apps that draw their own text without exposing it to macOS (some canvas-based editors, games, remote desktops) don't get inline suggestions; where only the field is known, a floating card is used instead.
 - Input methods that compose text (Pinyin, Kana…) pause suggestions while composing.
 - Text you copied is used only if macOS lets Foreword read the clipboard without asking (Settings › Personal explains how to allow it).

@@ -164,6 +164,9 @@ final class TestBenchController: NSObject, WKNavigationDelegate {
         case "target":
             SuggestionController.shared.debugRetarget(identifier: cmd["identifier"] as? String ?? "")
             try? await Task.sleep(nanoseconds: 1_000_000_000)
+        case "ghost":
+            SuggestionController.shared.debugShowGhost(cmd["text"] as? String ?? "")
+            try? await Task.sleep(nanoseconds: UInt64((cmd["settle"] as? Double ?? 0.8) * 1e9))
         case "suggest":
             SuggestionController.shared.debugSuggestNow()
             try? await Task.sleep(nanoseconds: UInt64((cmd["settle"] as? Double ?? 1.0) * 1e9))

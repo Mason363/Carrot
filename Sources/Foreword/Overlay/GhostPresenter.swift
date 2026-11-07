@@ -50,6 +50,7 @@ final class GhostPresenter {
     func show(_ text: String, snapshot: FieldSnapshot, preferPill: Bool, correction original: String? = nil,
               correctionRect: CGRect? = nil) -> String? {
         let prefs = Preferences.shared
+        var snapshot = snapshot
         guard var caretRect = correctionRect ?? snapshot.caret ?? fallbackCaret(for: snapshot) else { hide(); return nil }
         lastShowRequest = original == nil ? (text, snapshot, preferPill) : nil
         let engine = snapshot.info.engine
@@ -60,6 +61,14 @@ final class GhostPresenter {
                                heightCheck: reportedHeight == nil || engine != .blink ? nil : { height in
                                    { font in TextEngine.blinkBoxHeights(font: font, scale: 2).contains(height.rounded()) }
                                })
+        // Google Docs' canvas has no text geometry: the line so far is its paragraph's text ending
+        // at the caret (the start this gives stays put while typing along one visual line).
+        if snapshot.isCanvasCaret, snapshot.lineText == nil, let caret = snapshot.caret {
+            let paragraph = String(snapshot.prefix.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline }).last ?? "")
+            let width = GhostView.exactWidth(of: paragraph, font: font)
+            snapshot.lineText = paragraph
+            snapshot.lineStart = CGRect(x: caret.minX - width, y: caret.minY, width: 0, height: caret.height)
+        }
         // A face identified from the screen beats one guessed from widths.
         let calibrationKey = snapshot.lineStart.map {
             ScreenCalibrator.LineKey(element: snapshot.info.element, lineTop: Int(($0.minY * 2).rounded()),
@@ -99,6 +108,11 @@ final class GhostPresenter {
         }
         var baseline = modelBaseline
             ?? round(Self.baseline(for: font, lineHeight: caretRect.height, web: snapshot.info.isWebContent) * scale) / scale
+        if snapshot.isCanvasCaret {
+            // Docs' caret runs from the text's ascent to its descent, rounded up: the baseline sits a
+            // descent above its bottom.
+            baseline = ((caretRect.height + font.descender) * scale).rounded(.toNearestOrAwayFromZero) / scale
+        }
         // Screen calibration, when on: where this line's text really is, measured from the screen.
         var calibrationNeeded: (key: ScreenCalibrator.LineKey, lineText: String, lineAdvance: CGFloat)?
         let calibratedLeft: CGFloat? = nil
@@ -146,6 +160,10 @@ final class GhostPresenter {
                 let available: CGFloat
                 if let wrap {
                     available = wrap.right - caretRect.minX
+                } else if snapshot.isCanvasCaret, let field = snapshot.fieldFrame {
+                    // Inside the page's text column, not just the editor.
+                    let column = docsColumnRight(snapshot: snapshot, font: font, caret: caretRect) ?? .infinity
+                    available = min(field.maxX - 8, column) - caretRect.minX
                 } else if let field = snapshot.fieldFrame, field.width > 20 {
                     available = field.maxX - caretRect.minX - 6
                 } else {
@@ -606,6 +624,49 @@ final class GhostPresenter {
                   let last = self.lastShowRequest else { return }
             self.show(last.text, snapshot: last.snapshot, preferPill: last.preferPill)
         }
+    }
+
+    /// Left edge of each Google Docs document's text column, learned from a paragraph short
+    /// enough to sit on one line (its text ends at the caret).
+    private var docsColumnLeft: [AXElement: CGFloat] = [:]
+    /// Docs pages are 8.5 inches wide with one-inch margins: a 6.5-inch (624 px) text column.
+    private static let docsColumnWidth: CGFloat = 624
+
+    private func docsColumnRight(snapshot: FieldSnapshot, font: NSFont, caret: CGRect) -> CGFloat? {
+        let element = snapshot.info.element
+        let paragraph = String(snapshot.prefix.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline }).last ?? "")
+        let width = GhostView.exactWidth(of: paragraph, font: font)
+        if !paragraph.isEmpty, width < Self.docsColumnWidth * 0.9 {
+            docsColumnLeft[element] = caret.minX - width
+            if docsColumnLeft.count > 50 { docsColumnLeft.removeAll() }
+        }
+        return docsColumnLeft[element].map { $0 + Self.docsColumnWidth }
+    }
+
+    // MARK: Notices
+
+    private var noticeHide: DispatchWorkItem?
+
+    /// A short message in a floating card below `rect` (AX coordinates), gone after a few seconds.
+    func showNotice(_ message: String, below rect: CGRect) {
+        let font = NSFont.systemFont(ofSize: 13)
+        let content = GhostContent(text: message, style: .pill, font: font, color: .secondaryLabelColor, hint: nil,
+                                   baseline: 0, lineHeight: rect.height)
+        let size = GhostView.pillSize(for: content)
+        let cocoa = ScreenGeometry.cocoaRect(fromAX: rect)
+        let visible = ScreenGeometry.screen(containing: CGPoint(x: cocoa.midX, y: cocoa.midY))?.visibleFrame ?? .zero
+        var origin = NSPoint(x: cocoa.minX - GhostView.pillPadding.left, y: cocoa.minY - 6 - size.height)
+        if origin.y < visible.minY + 2 { origin.y = cocoa.maxY + 6 }
+        origin.x = min(max(origin.x, visible.minX + 4), visible.maxX - size.width - 4)
+        apply(content: content, frame: NSRect(origin: NSPoint(x: origin.x.rounded(), y: origin.y.rounded()), size: size))
+        displayedText = ""
+        noticeHide?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.content?.text == message else { return }
+            self.hide()
+        }
+        noticeHide = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 9, execute: work)
     }
 
     struct WrapGeometry {

@@ -26,6 +26,9 @@ struct FieldInfo: Equatable {
     var isRichText = false
     /// The scroll view showing the field, which bounds where its text can be seen.
     var scrollArea: AXElement?
+    /// Google Docs draws its text on a canvas; with its braille support on, the focused (off-screen)
+    /// text area holds the document's text, and the visible caret is a separate element.
+    var isGoogleDocs: Bool { domain == "docs.google.com" }
 
     static func == (lhs: FieldInfo, rhs: FieldInfo) -> Bool { lhs.element == rhs.element }
 }
@@ -70,6 +73,8 @@ struct FieldSnapshot {
     var previousLineTop: CGFloat?
     /// The part of the screen where the field's text is visible (its scroll view), AX coordinates.
     var visibleFrame: CGRect?
+    /// The caret came from Google Docs' own caret element over its canvas (no text geometry).
+    var isCanvasCaret = false
     let timestamp = ProcessInfo.processInfo.systemUptime
 
     var hasSelection: Bool { selection.length > 0 }
@@ -320,8 +325,13 @@ enum FieldReader {
         var snapshot = FieldSnapshot(info: info, prefix: prefix, suffix: suffix, selection: selection, totalLength: total,
                                      fieldFrame: fieldFrame)
         if selection.length == 0 {
-            locateCaret(&snapshot, element: element, cached: cached)
-            snapshot.visibleFrame = visibleFrame(of: info, fieldFrame: fieldFrame)
+            if info.isGoogleDocs, let frame = fieldFrame, frame.maxY < -1000 {
+                // The text area is parked far off-screen: everything visible comes from Docs' caret.
+                googleDocsCaret(&snapshot, element: element)
+            } else {
+                locateCaret(&snapshot, element: element, cached: cached)
+                snapshot.visibleFrame = visibleFrame(of: info, fieldFrame: fieldFrame)
+            }
         }
         return snapshot
     }
@@ -339,6 +349,88 @@ enum FieldReader {
     private static func safeBoundary(_ ns: NSString, _ index: Int) -> Int {
         guard index > 0, index < ns.length else { return index }
         return ns.rangeOfComposedCharacterSequence(at: index).location
+    }
+
+    // MARK: Google Docs
+
+    /// Docs' visible caret for the current user (collaborators' carets have other ids), and the
+    /// editor around it; found once per window and then only re-read.
+    private static var docsCaretCache: (window: AXElement, caret: AXElement, editor: AXElement?)?
+    static let docsCaretIdentifier = "kix-current-user-cursor-caret"
+
+    private static func docsCaretElements(for element: AXElement) -> (caret: AXElement, editor: AXElement?)? {
+        guard let window = element.window else { return nil }
+        if let cached = docsCaretCache, cached.window == window,
+           cached.caret.string("AXDOMIdentifier") == docsCaretIdentifier {
+            return (cached.caret, cached.editor)
+        }
+        var queue = [window]
+        var index = 0
+        while index < queue.count, index < 4000 {
+            let current = queue[index]
+            index += 1
+            if current.string("AXDOMIdentifier") == docsCaretIdentifier {
+                let editor = current.ancestor(maxDepth: 8) { $0.string("AXDOMIdentifier") == "kix-appview" }
+                docsCaretCache = (window, current, editor)
+                return (current, editor)
+            }
+            queue.append(contentsOf: current.children)
+        }
+        return nil
+    }
+
+    private static func googleDocsCaret(_ snapshot: inout FieldSnapshot, element: AXElement) {
+        guard let (caretElement, editor) = docsCaretElements(for: element), let caret = caretElement.frame,
+              caret.height >= 4, caret.height < 200 else {
+            docsCaretCache = nil
+            return
+        }
+        let editorFrame = editor?.frame
+        // Hidden while the caret is scrolled out of the editor.
+        if let editorFrame, !editorFrame.insetBy(dx: -2, dy: -2).contains(CGPoint(x: caret.minX, y: caret.midY)) { return }
+        snapshot.caret = CGRect(x: caret.minX, y: caret.minY, width: 0, height: caret.height)
+        snapshot.isCanvasCaret = true
+        snapshot.fieldFrame = editorFrame
+        snapshot.visibleFrame = editorFrame
+        // The font: Docs reports the family (its size is rounded); the size follows from the caret.
+        let location = snapshot.selection.location
+        if location > 0, let attributed = element.attributedString(for: CFRange(location: location - 1, length: 1)),
+           attributed.length > 0,
+           let font = attributed.attributes(at: 0, effectiveRange: nil)[NSAttributedString.Key(rawValue: "AXFont")] as? [String: Any] {
+            snapshot.fontName = (font["AXFontName"] as? String) ?? (font["AXFontFamily"] as? String)
+            snapshot.fontSize = (font["AXFontSize"] as? NSNumber).map { CGFloat($0.doubleValue) }
+        }
+        snapshot.fontName = snapshot.fontName ?? "Arial"
+        snapshot.fontSize = docsFontSize(caretHeight: caret.height, family: snapshot.fontName!, reported: snapshot.fontSize)
+    }
+
+    /// Docs sizes text in points (at 4/3 px each) and makes its caret as tall as the font's
+    /// ascent plus descent, rounded up. Of the sizes that fit the caret, the one nearest what Docs
+    /// reported wins.
+    static func docsFontSize(caretHeight: CGFloat, family: String, reported: CGFloat?) -> CGFloat {
+        let sizes: [CGFloat] = [6, 7, 8, 9, 10, 10.5, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 26, 28, 30, 32, 36, 40, 48, 60, 72, 96]
+        let probe = NSFont(name: family, size: 100) ?? NSFontManager.shared.font(withFamily: family, traits: [], weight: 5, size: 100)
+            ?? NSFont.systemFont(ofSize: 100)
+        let extent = (probe.ascender - probe.descender) / 100
+        let fitting = sizes.map { $0 * 4 / 3 }.filter { abs(($0 * extent).rounded(.up) - caretHeight.rounded()) <= 0.5 }
+        if let reported, let nearest = fitting.min(by: { abs($0 - reported) < abs($1 - reported) }) { return nearest }
+        if let first = fitting.first { return first }
+        return caretHeight / max(extent, 0.5)
+    }
+
+    /// Whether `element` is Docs' hidden input in its default mode (no text exposed): Foreword can
+    /// do nothing there until braille support is turned on.
+    static func isUnreadableGoogleDocs(_ element: AXElement) -> Bool {
+        guard let frame = element.frame, frame.maxY < -1000, element.raw(kAXSelectedTextRangeAttribute) == nil,
+              element.raw("AXSelectedTextMarkerRange") != nil,
+              let webArea = element.ancestor(maxDepth: 40, where: { $0.role == "AXWebArea" }),
+              let url = webURL(of: webArea), URL(string: url)?.host == "docs.google.com" else { return false }
+        return true
+    }
+
+    /// The visible Docs caret near `element`, for pointing at it (hints).
+    static func googleDocsCaretRect(near element: AXElement) -> CGRect? {
+        docsCaretElements(for: element)?.caret.frame
     }
 
     /// Where the field's text can be seen: its frame clipped to the scroll view around it.
