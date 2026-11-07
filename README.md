@@ -79,6 +79,8 @@ Suggestions aim for a few words at a time, so a suggestion is often useful for i
 
 The "How often" slider in Settings moves between these points.
 
+Those sixteen pieces also served to tune the defaults, so they flatter them a little. On a separate set of 104 pieces (`ForewordKit/Eval/corpus.json`: email, chat, notes, essays, technical writing, fiction, reviews, instructions, and a few in Chinese, Spanish and French) the default model saves 48% of keystrokes; 68% of its suggestions start with the right word and 23% are right to the end, at 36 ms per suggestion. Read by hand, about 94% of the suggestions it shows are either right or something a person could reasonably have written.
+
 ## Known limitations
 
 - Google Docs draws its text on a canvas and only shares it with other apps when its own accessibility support is on: in a document, turn on **Tools › Accessibility › Turn on screen reader support** and **Turn on braille support**. Foreword shows a reminder in Docs when they're off.
@@ -114,6 +116,8 @@ cd ForewordKit
 swift build -c release
 .build/release/foreword-eval cases <model.gguf>   # scenario report
 .build/release/foreword-eval sim <model.gguf>     # keystroke simulation: savings, precision, latency
+.build/release/foreword-eval sim <model.gguf> --docs Eval/corpus.json --log run.jsonl
+python3 Eval/analyze.py Eval/corpus.json run.jsonl # per kind of writing, confidence, word by word
 swift test
 ```
 

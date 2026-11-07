@@ -4,7 +4,7 @@ import Foundation
 // foreword-eval — quality and latency harness for the prediction engine.
 //
 //   foreword-eval cases <model.gguf> [--eager 0.5] [--length medium] [--trace]
-//   foreword-eval sim   <model.gguf> [--eager 0.5] [--length medium] [--verbose]
+//   foreword-eval sim   <model.gguf> [--eager 0.5] [--length medium] [--verbose] [--docs corpus.json] [--log out.jsonl]
 //   foreword-eval bench <model.gguf>
 
 setvbuf(stdout, nil, _IONBF, 0)
@@ -79,10 +79,24 @@ case "cases":
 
 case "sim":
     _ = try? engine.completeNow(CompletionRequest(context: "", prefix: "Hello there, how are", options: options))
+    // `--docs`: a JSON corpus instead of the built-in documents; `--log`: one JSON line per suggestion shown.
+    var documents = simDocuments.enumerated().map { (id: "builtin-\($0.offset)", genre: "builtin", doc: $0.element) }
+    if let path = flag("--docs") {
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        documents = try JSONDecoder().decode([CorpusDocument].self, from: data).map { ($0.id, $0.genre, $0.simDocument) }
+    }
+    let log: FileHandle? = flag("--log").flatMap { path in
+        FileManager.default.createFile(atPath: path, contents: nil)
+        return FileHandle(forWritingAtPath: path)
+    }
+    func write(_ object: [String: Any]) {
+        guard let log, let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return }
+        log.write(data + Data("\n".utf8))
+    }
     var totalChars = 0, keystrokes = 0, shown = 0, correct = 0, wrong = 0, savedChars = 0, full = 0, wrongChars = 0
     var shownWords = 0.0, multiWord = 0, firstWordRight = 0
     var latencies: [Double] = []
-    for doc in simDocuments {
+    for (docID, genre, doc) in documents {
         let header: String
         switch flag("--header") {
         case "none": header = ""
@@ -103,6 +117,11 @@ case "sim":
             guard let r = result else { continue }
             shown += 1
             let (accepted, presses) = acceptedLength(suggestion: r.text, truth: truth)
+            write(["doc": docID, "genre": genre, "at": i, "prefix": String(prefix.suffix(160)), "suggestion": r.text,
+                   "truth": String(truth.prefix(80)), "accepted": accepted, "full": truth.hasPrefix(r.text),
+                   "p": r.probability, "first": r.firstWordProbability, "frag": r.fragmentProbability,
+                   "ms": r.milliseconds, "stop": r.stopReason, "kind": r.kind.rawValue,
+                   "midWord": TextAnalysis.split(prefix).isMidWord])
             if truth.hasPrefix(r.text) { full += 1 }
             let words = TextAnalysis.wordCount(r.text)
             shownWords += words
@@ -219,3 +238,22 @@ func acceptedLength(suggestion: String, truth: String) -> (Int, Int) {
 // Skip static destructors: ggml-metal asserts if the device is torn down while buffers are alive.
 fflush(stdout)
 _exit(0)
+
+/// A document of a corpus file for `sim --docs`.
+struct CorpusDocument: Decodable {
+    var id: String
+    var genre: String
+    var app: String?
+    var title: String?
+    var website: String?
+    var field: String?
+    var screen: String?
+    var about: String?
+    var clipboard: String?
+    var text: String
+
+    var simDocument: SimDocument {
+        SimDocument(context: WritingContext(appName: app, windowTitle: title, website: website, fieldLabel: field,
+                                            screenText: screen, aboutUser: about, clipboard: clipboard), text: text)
+    }
+}
