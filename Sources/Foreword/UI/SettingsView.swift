@@ -409,7 +409,7 @@ struct PersonalSettings: View {
                 }
                 Toggle(isOn: $prefs.useScreenContext) {
                     Text("Use text on screen")
-                    Text("Reads what's around the text field — the message you're replying to, the page you're on.")
+                    Text("Reads what's around the text field and in the windows you can see next to it — the message you're replying to, the page behind your note. Password managers are never read.")
                 }
                 Toggle(isOn: $prefs.useClipboard) {
                     Text("Use what I copy")

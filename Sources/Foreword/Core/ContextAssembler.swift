@@ -76,6 +76,10 @@ final class ContextAssembler {
 
         ScreenContextCollector.queue.async { [weak self] in
             let screen = useScreen ? ScreenContextCollector.collect(around: info, fieldFrame: fieldFrame) : nil
+            let others = useScreen
+                ? ScreenContextCollector.collectOtherWindows(excluding: info, fieldFrame: fieldFrame)
+                    .map { WritingContext.VisibleWindow(title: $0.title, text: $0.text) }
+                : []
             let query = [info.windowTitle ?? "", info.label ?? "", String(existingText.suffix(600)), String((screen ?? "").suffix(800))]
                 .joined(separator: " ")
             let finish: ([String]) -> Void = { memories in
@@ -83,6 +87,7 @@ final class ContextAssembler {
                     guard let self, self.generation == token else { return }
                     var ctx = self.context
                     ctx.screenText = screen.map { self.trimScreen($0, excluding: existingText) }
+                    ctx.otherWindows = others
                     ctx.clipboard = self.context.clipboard
                     ctx.memories = memories
                     if ctx != self.context {

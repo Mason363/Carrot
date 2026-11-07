@@ -18,6 +18,17 @@ public struct WritingContext: Sendable, Equatable {
     public var styleNotes: String?
     /// Text the user copied recently (a link, an address, a quote they're about to reference).
     public var clipboard: String?
+    /// Text visible in other apps' windows around the one being written in (the page behind a note).
+    public var otherWindows: [VisibleWindow] = []
+
+    public struct VisibleWindow: Sendable, Equatable {
+        public var title: String
+        public var text: String
+        public init(title: String, text: String) {
+            self.title = title
+            self.text = text
+        }
+    }
 
     public init(appName: String? = nil, windowTitle: String? = nil, website: String? = nil,
                 fieldLabel: String? = nil, screenText: String? = nil, aboutUser: String? = nil,
@@ -44,6 +55,7 @@ public enum PromptBuilder {
     public static let memoryBudget = 900
     public static let aboutBudget = 600
     public static let clipboardBudget = 700
+    public static let otherWindowsBudget = 1400
 
     public static func header(for context: WritingContext) -> String {
         var lines: [String] = []
@@ -78,6 +90,17 @@ public enum PromptBuilder {
         if !place.isEmpty { lines.append("Writing in: " + place.joined(separator: " — ")) }
         if let label = clean(context.fieldLabel, limit: 120) { lines.append("Field: \(label)") }
 
+        // Other windows first: the window being written in is the closer context.
+        var otherBudget = otherWindowsBudget
+        for window in context.otherWindows where otherBudget > 120 {
+            guard let text = clean(window.text, limit: otherBudget, keepTail: false, singleLine: false) else { continue }
+            otherBudget -= text.count
+            let title = clean(window.title, limit: 120).map { " (\($0))" } ?? ""
+            lines.append("Also on screen\(title):")
+            lines.append("\"\"\"")
+            lines.append(text)
+            lines.append("\"\"\"")
+        }
         if let screen = clean(context.screenText, limit: screenBudget, keepTail: true, singleLine: false) {
             lines.append("On screen:")
             lines.append("\"\"\"")

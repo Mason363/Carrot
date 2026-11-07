@@ -5,7 +5,7 @@ First release.
 - Long suggestions continue onto the next line the way the field wraps
 - Optional exact placement in browsers (Settings › Appearance; uses Screen Recording, nothing is stored)
 - Mid-word, end-of-line and mid-line suggestions; typo corrections
-- Context from the screen, the clipboard, your earlier writing and your profile
+- Context from the screen (including the windows behind or beside the one you write in), the clipboard, your earlier writing and your profile
 - Runs entirely on your Mac (Qwen3.5 base models via llama.cpp on Metal)
 
 Requires an Apple silicon Mac with macOS 14 or later.

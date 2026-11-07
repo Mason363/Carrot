@@ -15,7 +15,7 @@ It runs a small language model on your Mac's GPU. There's no account, no subscri
 ## Features
 
 - **Works everywhere.** Native apps, Electron apps and web pages in Safari, Chrome, Arc, Edge, Brave, Firefox and Zen — anywhere macOS can tell it where your cursor is.
-- **Predictions that fit.** Foreword reads the text around your cursor, what's on screen (the email you're replying to, the conversation above), the app and page you're in, what you've written before, and what you've told it about yourself.
+- **Predictions that fit.** Foreword reads the text around your cursor, what's on screen (the email you're replying to, the conversation above, the page behind your note), the app and page you're in, what you've written before, and what you've told it about yourself.
 - **Finishes words, phrases and sentences.** Mid-word completions, whole-phrase suggestions, and suggestions in the middle of a line.
 - **Fixes typos.** When the word you just typed looks misspelled, Foreword offers the correction that fits the sentence.
 - **Knows when to stay quiet.** It only suggests what it's reasonably sure of, never in password fields, and stays out of terminals, code editors and password managers unless you turn it on.
@@ -120,7 +120,7 @@ swift test
 ## How it works
 
 1. **Reading the field.** Foreword follows keyboard focus through the Accessibility API, reads the text around the caret and asks the app where the caret is on screen. Chromium, Electron and Firefox build their accessibility trees on request, so Foreword switches them on.
-2. **Building the prompt.** The prompt is the text before the cursor, preceded by a short header: app or website, window title, field label, nearby text on screen, related things you've written before, and your "About you" note.
+2. **Building the prompt.** The prompt is the text before the cursor, preceded by a short header: app or website, window title, field label, nearby text on screen and visible text in the windows behind or beside it, related things you've written before, and your "About you" note.
 3. **Predicting.** The partial word under the cursor is removed from the prompt and re-imposed as a byte-level constraint ("token healing"), so `the docu` completes to `ment` cleanly. Decoding is greedy and deterministic, with a penalty against repeating your own sentences back to you. The suggestion is cut at the last word the model is sure of and never ends on a dangling "and" or "the".
 4. **Staying fast.** The model's state is cached between keystrokes. For attention models the cache is trimmed in place; for hybrid models like Qwen3.5 a few checkpoints are kept so that backspacing is cheap too.
 5. **Showing it.** A single click-through overlay draws the text with the field's own font and baseline. When you type a character that matches the suggestion, the overlay shifts immediately instead of waiting for a new prediction, so nothing flickers.
