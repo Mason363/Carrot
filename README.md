@@ -8,7 +8,7 @@
 
 ---
 
-Foreword suggests the rest of your sentence as you type — in Mail, Messages, Slack, Notion, Google Docs, or any other text field — and shows it as gray text right where you're writing. Press <kbd>Tab</kbd> to take it a word at a time, <kbd>⇧</kbd><kbd>Tab</kbd> to take all of it, or just keep typing.
+Foreword suggests the rest of your sentence as you type — in Mail, Messages, Slack, Notion, Obsidian, Google Docs, or any other text field — and shows it as gray text right where you're writing. Press <kbd>Tab</kbd> to take it a word at a time, <kbd>⇧</kbd><kbd>Tab</kbd> to take all of it, or just keep typing.
 
 It runs a small language model on your Mac's GPU. There's no account, no subscription, no usage limit, and nothing you type is ever sent anywhere.
 
@@ -119,7 +119,7 @@ swift test
 
 ## How it works
 
-1. **Reading the field.** Foreword follows keyboard focus through the Accessibility API, reads the text around the caret and asks the app where the caret is on screen. Chromium, Electron and Firefox build their accessibility trees on request, so Foreword switches them on.
+1. **Reading the field.** Foreword follows keyboard focus through the Accessibility API, reads the text around the caret and asks the app where the caret is on screen. Chromium, Electron and Firefox build their accessibility trees on request, so Foreword switches them on. CodeMirror editors (Obsidian and many web editors) report caret offsets that don't match their text once a note has headings, lists or widgets, so those are read line by line around the caret, with the Markdown that Live Preview hides put back.
 2. **Building the prompt.** The prompt is the text before the cursor, preceded by a short header: app or website, window title, field label, nearby text on screen and visible text in the windows behind or beside it, related things you've written before, and your "About you" note.
 3. **Predicting.** The partial word under the cursor is removed from the prompt and re-imposed as a byte-level constraint ("token healing"), so `the docu` completes to `ment` cleanly. Decoding is greedy and deterministic, with a penalty against repeating your own sentences back to you. The suggestion is cut at the last word the model is sure of and never ends on a dangling "and" or "the".
 4. **Staying fast.** The model's state is cached between keystrokes. For attention models the cache is trimmed in place; for hybrid models like Qwen3.5 a few checkpoints are kept so that backspacing is cheap too.

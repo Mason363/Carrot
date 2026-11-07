@@ -755,8 +755,12 @@ final class SuggestionController: ObservableObject {
                   let current = self.lastSnapshot, current.prefix == correction.prefix, current.info == snapshot.info else { return }
             let info = snapshot.info
             let length = (correction.original as NSString).length
+            let distance = snapshot.selection.location - correction.wordStart
             AXQueue.queue.async {
-                let rect = info.element.bounds(for: CFRange(location: correction.wordStart, length: length))
+                // CodeMirror's offsets don't match its text: find the word by stepping back from the caret.
+                let rect = info.isCodeMirror
+                    ? CodeMirrorReader.bounds(before: distance, length: length, in: info.element)
+                    : info.element.bounds(for: CFRange(location: correction.wordStart, length: length))
                 DispatchQueue.main.async {
                     guard self.fieldEligible, self.prefs.isActive, self.keySequence == keysAtCheck,
                           let current = self.lastSnapshot, current.prefix == correction.prefix else { return }
@@ -852,6 +856,7 @@ final class SuggestionController: ObservableObject {
         [
             "field": field.map { "\($0.appName ?? "?") \($0.role ?? "?") eligible=\(fieldEligible)" } ?? "none",
             "prefix": String(lastSnapshot?.prefix.suffix(80) ?? ""),
+            "document": lastSnapshot.map { String($0.prefix.suffix(1500)) + "‸" + String($0.suffix.prefix(300)) } ?? "",
             "suggestion": active?.remaining ?? "",
             "visible": presenter.isVisible,
             "style": presenter.content.map { "\($0.style)" } ?? "",

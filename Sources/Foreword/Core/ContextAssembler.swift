@@ -22,7 +22,9 @@ final class ContextAssembler {
         var ctx = WritingContext()
         let isBrowser = AppRules.isBrowser(info.bundleID)
         ctx.appName = isBrowser ? nil : info.appName
-        ctx.website = info.domain
+        // Electron apps load their own pages (app://obsidian.md/…): only real web pages are websites.
+        let isWebPage = info.url.map { $0.hasPrefix("http://") || $0.hasPrefix("https://") } ?? false
+        ctx.website = isWebPage ? info.domain : nil
         ctx.windowTitle = cleanTitle(info.windowTitle, appName: info.appName)
         if let label = info.label, label.count <= 120, !label.isEmpty { ctx.fieldLabel = label }
         ctx.aboutUser = prefs.aboutMe.isEmpty ? nil : prefs.aboutMe
@@ -118,8 +120,13 @@ final class ContextAssembler {
     private func cleanTitle(_ title: String?, appName: String?) -> String? {
         guard var t = title?.trimmingCharacters(in: .whitespaces), !t.isEmpty else { return nil }
         if let appName {
-            for separator in [" — ", " - ", " – ", " | "] where t.hasSuffix(separator + appName) {
-                t = String(t.dropLast(separator.count + appName.count))
+            // "Note - Vault - Obsidian 1.15.0": the app's name, with or without its version.
+            for separator in [" — ", " - ", " – ", " | "] {
+                guard let range = t.range(of: separator + appName, options: .backwards) else { continue }
+                let rest = t[range.upperBound...].trimmingCharacters(in: .whitespaces)
+                if rest.isEmpty || rest.allSatisfy({ $0.isNumber || $0 == "." || $0 == "v" }) {
+                    t = String(t[..<range.lowerBound])
+                }
             }
         }
         // Browsers append their name, and Chromium also the profile ("… - Google Chrome - Work").

@@ -26,6 +26,8 @@ struct FieldInfo: Equatable {
     var isRichText = false
     /// The scroll view showing the field, which bounds where its text can be seen.
     var scrollArea: AXElement?
+    /// A CodeMirror 6 editor in Chromium (Obsidian…): read line by line through text markers.
+    var isCodeMirror = false
     /// Google Docs draws its text on a canvas; with its braille support on, the focused (off-screen)
     /// text area holds the document's text, and the visible caret is a separate element.
     var isGoogleDocs: Bool { domain == "docs.google.com" }
@@ -224,6 +226,10 @@ enum FieldReader {
         if webArea != nil {
             info.engine = TextEngine.webEngine(for: app)
             info.isRichText = markerDocument || isWebRichText(element, role: role)
+            if info.engine == .blink, !markerDocument, CodeMirrorReader.isEditor(element) {
+                info.isCodeMirror = true
+                info.isRichText = true
+            }
         }
         return info
     }
@@ -266,6 +272,19 @@ enum FieldReader {
     /// Reads the text around the caret plus caret geometry.
     static func snapshot(of info: FieldInfo, cached: CachedGeometry? = nil) -> FieldSnapshot? {
         if info.usesTextMarkers { return markerSnapshot(of: info, cached: cached) }
+        let started = ProcessInfo.processInfo.systemUptime
+        if info.isCodeMirror,
+           var snapshot = CodeMirrorReader.snapshot(of: info, prefixLimit: prefixLimit, suffixLimit: suffixLimit) {
+            if TestBench.isDebugging {
+                let ms = (ProcessInfo.processInfo.systemUptime - started) * 1000
+                FileHandle.standardError.write(String(format: "codemirror read %.1f ms\n", ms).data(using: .utf8)!)
+            }
+            if snapshot.selection.length == 0 {
+                _ = blinkMarkerCaret(&snapshot, element: info.element, needCaret: true)
+                snapshot.visibleFrame = visibleFrame(of: info, fieldFrame: snapshot.fieldFrame)
+            }
+            return snapshot
+        }
         let element = info.element
         element.setTimeout(0.3)
         let attrs = attributes(element, [
@@ -534,7 +553,8 @@ enum FieldReader {
                     snapshot.sampleText = text
                     snapshot.sampleWidth = r.width
                 }
-                if !text.contains("\t"), text.utf16.count <= 400 {
+                // Widgets (checkboxes, inline images) take room no font measures.
+                if !text.contains("\t"), !text.unicodeScalars.contains("\u{FFFC}"), text.utf16.count <= 400 {
                     snapshot.lineStart = CGRect(x: r.minX, y: r.minY, width: 0, height: r.height)
                     snapshot.lineText = text
                     snapshot.lineBox = r
