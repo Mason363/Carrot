@@ -219,6 +219,8 @@ final class SuggestionController: ObservableObject {
     }
 
     private func noteKeyActivity(_ kind: KeyKind) {
+        // Anything but taking a suggestion ends a run of forced ones.
+        if kind != .accept { forcing = false }
         lastKey = kind
         lastKeyTime = ProcessInfo.processInfo.systemUptime
         switch kind {
@@ -316,6 +318,7 @@ final class SuggestionController: ObservableObject {
     }
 
     private func setField(_ info: FieldInfo?) {
+        forcing = false
         endJournalSession()
         commitMemory()
         hide()
@@ -565,9 +568,22 @@ final class SuggestionController: ObservableObject {
     }
 
     /// Text equality that tolerates the bounded prefix window having moved.
+    /// Invisible differences don't count: some editors (Google Docs) report a typed space as a
+    /// non-breaking one, or keep zero-width marks in their text.
     static func sameText(_ a: String, _ b: String) -> Bool {
+        let a = comparable(a), b = comparable(b)
         if a.count < 900 || b.count < 900 { return a == b }
         return a.suffix(800) == b.suffix(800)
+    }
+
+    private static func comparable(_ text: String) -> String {
+        let invisible: Set<Unicode.Scalar> = ["\u{200B}", "\u{FEFF}", "\u{2060}"]
+        guard text.unicodeScalars.contains(where: { $0 == "\u{00A0}" || invisible.contains($0) }) else { return text }
+        var scalars = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars where !invisible.contains(scalar) {
+            scalars.append(scalar == "\u{00A0}" ? " " : scalar)
+        }
+        return String(scalars)
     }
 
     // MARK: Requests
@@ -594,6 +610,7 @@ final class SuggestionController: ObservableObject {
     /// A beep says there's nothing to suggest here.
     private func forceSuggestion() {
         guard let field, fieldEligible, models.engine != nil else { NSSound.beep(); return }
+        forcing = true
         hide()
         suppressUntilBoundary = false
         let cached = geometry
@@ -611,7 +628,12 @@ final class SuggestionController: ObservableObject {
         }
     }
 
+    /// The user asked for a suggestion and is taking it word by word: what follows each accepted
+    /// piece is asked for on the same terms, so the rest doesn't vanish for not being sure enough.
+    private var forcing = false
+
     private func request(for snapshot: FieldSnapshot, forced: Bool = false) {
+        let forced = forced || (forcing && lastKey == .accept)
         guard fieldEligible, let engine = models.engine, forced ? mayForce(snapshot) : shouldRequest(snapshot) else {
             if forced { NSSound.beep() }
             return
