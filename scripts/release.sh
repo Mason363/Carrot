@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Builds a signed, notarized Foreword.dmg in dist/.
+# Builds a signed, notarized Carrot.dmg in dist/.
 #
 #   APPLE_ID=you@example.com APP_SPECIFIC_PASSWORD=xxxx-xxxx-xxxx-xxxx scripts/release.sh [--publish]
 #
@@ -16,9 +16,9 @@ IDENTITY="${SIGN_IDENTITY:-Developer ID Application}"
 : "${APP_SPECIFIC_PASSWORD:?Set APP_SPECIFIC_PASSWORD to an app-specific password for APPLE_ID}"
 
 VERSION=$(grep -m1 'MARKETING_VERSION' project.yml | sed -E 's/.*"([^"]+)".*/\1/')
-APP="build/DerivedData/Build/Products/Release/Foreword.app"
+APP="build/DerivedData/Build/Products/Release/Carrot.app"
 DIST="dist"
-DMG="$DIST/Foreword-$VERSION.dmg"
+DMG="$DIST/Carrot-$VERSION.dmg"
 
 notarize() {
   local result notary_status submission
@@ -33,9 +33,9 @@ notarize() {
   fi
 }
 
-echo "==> Building Foreword $VERSION"
+echo "==> Building Carrot $VERSION"
 xcodegen generate >/dev/null
-xcodebuild -project Foreword.xcodeproj -scheme Foreword -configuration Release \
+xcodebuild -project Carrot.xcodeproj -scheme Carrot -configuration Release \
   -derivedDataPath build/DerivedData clean build | grep -E "error:|BUILD (SUCCEEDED|FAILED)"
 
 echo "==> Verifying signature"
@@ -44,20 +44,20 @@ codesign -dv "$APP" 2>&1 | grep -E "Authority=Developer ID|TeamIdentifier|flags=
 
 echo "==> Notarizing the app"
 rm -rf "$DIST" && mkdir -p "$DIST"
-ditto -c -k --keepParent "$APP" "$DIST/Foreword.zip"
-notarize "$DIST/Foreword.zip"
+ditto -c -k --keepParent "$APP" "$DIST/Carrot.zip"
+notarize "$DIST/Carrot.zip"
 xcrun stapler staple "$APP"
-rm "$DIST/Foreword.zip"
+rm "$DIST/Carrot.zip"
 
 echo "==> Building the disk image"
 create-dmg \
-  --volname "Foreword" \
+  --volname "Carrot" \
   --background "$ROOT/Resources/DMG/background.tiff" \
   --window-pos 200 160 --window-size 560 340 \
   --icon-size 112 --text-size 13 \
-  --icon "Foreword.app" 150 160 \
+  --icon "Carrot.app" 150 160 \
   --app-drop-link 410 160 \
-  --hide-extension "Foreword.app" \
+  --hide-extension "Carrot.app" \
   --no-internet-enable \
   "$DMG" "$APP" >/dev/null
 codesign --sign "$IDENTITY" --timestamp "$DMG"
@@ -72,5 +72,5 @@ echo "==> Done: $DMG"
 
 if [[ "${1:-}" == "--publish" ]]; then
   echo "==> Publishing GitHub release v$VERSION"
-  gh release create "v$VERSION" "$DMG" --title "Foreword $VERSION" --notes-file "$ROOT/docs/release-notes.md"
+  gh release create "v$VERSION" "$DMG" --title "Carrot $VERSION" --notes-file "$ROOT/docs/release-notes.md"
 fi

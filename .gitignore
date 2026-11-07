@@ -1,8 +1,8 @@
 # Build output
 build/
 DerivedData/
-ForewordKit/.build/
-ForewordKit/.swiftpm/
+CarrotKit/.build/
+CarrotKit/.swiftpm/
 *.xcodeproj/
 *.xcworkspace/
 dist/

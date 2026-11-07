@@ -1,4 +1,4 @@
-name: Foreword
+name: Carrot
 options:
   bundleIdPrefix: io.github.mason363
   deploymentTarget:
@@ -22,29 +22,29 @@ settings:
       SWIFT_OPTIMIZATION_LEVEL: "-O"
       SWIFT_COMPILATION_MODE: wholemodule
 packages:
-  ForewordKit:
-    path: ForewordKit
+  CarrotKit:
+    path: CarrotKit
 targets:
-  Foreword:
+  Carrot:
     type: application
     platform: macOS
     sources:
-      - path: Sources/Foreword
+      - path: Sources/Carrot
       - path: Resources/AppIcon.icon
         type: file
         buildPhase: resources
       - path: Resources/Credits.rtf
         buildPhase: resources
     dependencies:
-      - package: ForewordKit
-        product: ForewordEngine
+      - package: CarrotKit
+        product: CarrotEngine
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.github.mason363.Foreword
-        PRODUCT_NAME: Foreword
+        PRODUCT_NAME: Carrot
         INFOPLIST_FILE: Resources/Info.plist
         GENERATE_INFOPLIST_FILE: NO
-        CODE_SIGN_ENTITLEMENTS: Resources/Foreword.entitlements
+        CODE_SIGN_ENTITLEMENTS: Resources/Carrot.entitlements
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         OTHER_CODE_SIGN_FLAGS: "--timestamp=none"

@@ -1,5 +1,5 @@
-# Foreword build entry points.
-APP := build/Release/Foreword.app
+# Carrot build entry points.
+APP := build/Release/Carrot.app
 
 .PHONY: all project app debug eval test release clean
 
@@ -9,23 +9,23 @@ project:
 	xcodegen generate
 
 app: project
-	xcodebuild -project Foreword.xcodeproj -scheme Foreword -configuration Release \
+	xcodebuild -project Carrot.xcodeproj -scheme Carrot -configuration Release \
 	  -derivedDataPath build/DerivedData build
-	@mkdir -p build/Release && rm -rf $(APP) && cp -R build/DerivedData/Build/Products/Release/Foreword.app $(APP)
+	@mkdir -p build/Release && rm -rf $(APP) && cp -R build/DerivedData/Build/Products/Release/Carrot.app $(APP)
 	@echo "Built $(APP)"
 
 debug: project
-	xcodebuild -project Foreword.xcodeproj -scheme Foreword -configuration Debug \
+	xcodebuild -project Carrot.xcodeproj -scheme Carrot -configuration Debug \
 	  -derivedDataPath build/DerivedData build
 
 eval:
-	cd ForewordKit && swift build -c release --product foreword-eval
+	cd CarrotKit && swift build -c release --product carrot-eval
 
 test:
-	cd ForewordKit && swift test
+	cd CarrotKit && swift test
 
 release: project
 	scripts/release.sh
 
 clean:
-	rm -rf build ForewordKit/.build Foreword.xcodeproj
+	rm -rf build CarrotKit/.build Carrot.xcodeproj

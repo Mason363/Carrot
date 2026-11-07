@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Xcode build phase: Foreword runs on Apple silicon only, so drop other architectures from
+# Xcode build phase: Carrot runs on Apple silicon only, so drop other architectures from
 # embedded frameworks (llama.cpp ships universal binaries) and re-sign them.
 set -euo pipefail
 FRAMEWORKS="${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}"

@@ -7,8 +7,13 @@
       "layers" : [
         {
           "glass" : true,
-          "image-name" : "caret.svg",
-          "name" : "caret"
+          "image-name" : "carrot.svg",
+          "name" : "carrot"
+        },
+        {
+          "glass" : true,
+          "image-name" : "leaves.svg",
+          "name" : "leaves"
         },
         {
           "glass" : false,
