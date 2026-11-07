@@ -94,6 +94,7 @@ Those sixteen pieces also served to tune the defaults, so they flatter them a li
 - Inference runs locally with [llama.cpp](https://github.com/ggml-org/llama.cpp) on Metal.
 - Carrot makes network requests only to download a model you choose.
 - What you write is remembered in a local SQLite index (`~/Library/Application Support/Carrot/memory.sqlite`) so suggestions can reuse your names and phrasing. You can browse it, turn it off, or erase it in **Settings › Personal**.
+- **Suggestion journal** (off by default, **Settings › Personal**): records what Carrot saw, what it suggested and what you wrote, so you can review how well it works for you. It stays in `~/Library/Application Support/Carrot/journal.sqlite` (readable only by you), is kept for 30 days, and can be deleted from the same place.
 - Password fields, secure input, and apps you exclude are never read.
 
 ## Building from source

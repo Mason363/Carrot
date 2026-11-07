@@ -373,6 +373,8 @@ struct PersonalSettings: View {
     @State private var memoryCount = MemoryStore.shared.count
     @State private var showingMemory = false
     @State private var confirmClear = false
+    @State private var journalSize = Journal.shared.fileSize
+    @State private var confirmDeleteJournal = false
 
     var body: some View {
         Form {
@@ -422,13 +424,37 @@ struct PersonalSettings: View {
                 Label("Everything stays on this Mac. Carrot never sends what you type anywhere.", systemImage: "lock")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section {
+                Toggle(isOn: $prefs.keepJournal) {
+                    Text("Keep a suggestion journal")
+                    Text("Records what Carrot saw, what it suggested and what you wrote, to review how well it works for you. Kept on this Mac for 30 days; never sent anywhere.")
+                }
+                if journalSize > 0 {
+                    HStack {
+                        Text("Journal: \(ByteCountFormatter.string(fromByteCount: journalSize, countStyle: .file))")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([Journal.fileURL]) }
+                        Button("Delete…") { confirmDeleteJournal = true }
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
         .onAppear {
+            journalSize = Journal.shared.fileSize
             memoryCount = MemoryStore.shared.count
             ClipboardMonitor.shared.updateAccess()
         }
         .sheet(isPresented: $showingMemory) { MemoryList() }
+        .confirmationDialog("Delete the suggestion journal?", isPresented: $confirmDeleteJournal) {
+            Button("Delete Journal", role: .destructive) {
+                Journal.shared.clear()
+                journalSize = 0
+            }
+        } message: {
+            Text("Everything it recorded is removed from this Mac.")
+        }
         .confirmationDialog("Forget everything Carrot has learned from your writing?", isPresented: $confirmClear) {
             Button("Forget All", role: .destructive) {
                 MemoryStore.shared.clear()

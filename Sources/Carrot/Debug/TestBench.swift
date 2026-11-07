@@ -38,6 +38,8 @@ enum TestBench {
     /// Any test mode: never persist the user's data, log requests.
     /// `--exact-placement`: turn screen calibration on for this run without saving the preference.
     static let forcesExactPlacement = CommandLine.arguments.contains("--exact-placement")
+    /// `--journal`: record a suggestion journal in a test run, in a temporary file (never the user's).
+    static let journalsToTemporaryFile = CommandLine.arguments.contains("--journal")
 
     static var isDebugging: Bool { isActive || observedBundleID != nil || isLiveTest }
     /// Modes that must never touch global keyboard input.

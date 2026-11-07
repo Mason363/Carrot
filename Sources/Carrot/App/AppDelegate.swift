@@ -56,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated {
             SuggestionController.shared.stop()
             MemoryStore.shared.flush()
+            Journal.shared.flush()
             UserDefaults.standard.synchronize()
         }
         // ggml's Metal backend asserts if its device is torn down while buffers are alive during

@@ -69,6 +69,8 @@ final class Preferences: ObservableObject {
     @Published var memoryEnabled: Bool { didSet { defaults.set(memoryEnabled, forKey: "memoryEnabled") } }
     @Published var useScreenContext: Bool { didSet { defaults.set(useScreenContext, forKey: "useScreenContext") } }
     @Published var useClipboard: Bool { didSet { defaults.set(useClipboard, forKey: "useClipboard") } }
+    /// Record what Carrot sees and suggests (on this Mac only) for reviewing how well it works.
+    @Published var keepJournal: Bool { didSet { defaults.set(keepJournal, forKey: "keepJournal") } }
     @Published var modelID: String { didSet { defaults.set(modelID, forKey: "modelID") } }
     @Published var customModelPath: String? { didSet { defaults.set(customModelPath, forKey: "customModelPath") } }
     @Published var hasCompletedOnboarding: Bool { didSet { defaults.set(hasCompletedOnboarding, forKey: "hasCompletedOnboarding") } }
@@ -78,7 +80,7 @@ final class Preferences: ObservableObject {
             "isEnabled": true, "eagerness": 0.5, "length": SuggestionLength.medium.rawValue,
             "typoCorrection": true, "midLineSuggestions": true, "ghostColor": GhostColor.automatic.rawValue,
             "ghostOpacity": 0.45, "showKeyHint": true, "wordIncludesPunctuation": false, "exactPlacement": false,
-            "memoryEnabled": true, "useScreenContext": true, "useClipboard": true,
+            "memoryEnabled": true, "useScreenContext": true, "useClipboard": true, "keepJournal": false,
             "modelID": ModelCatalog.defaultModel.id, "hasCompletedOnboarding": false,
         ])
         isEnabled = defaults.bool(forKey: "isEnabled")
@@ -111,6 +113,7 @@ final class Preferences: ObservableObject {
         memoryEnabled = defaults.bool(forKey: "memoryEnabled")
         useScreenContext = defaults.bool(forKey: "useScreenContext")
         useClipboard = defaults.bool(forKey: "useClipboard")
+        keepJournal = defaults.bool(forKey: "keepJournal")
         modelID = defaults.string(forKey: "modelID") ?? ModelCatalog.defaultModel.id
         customModelPath = defaults.string(forKey: "customModelPath")
         hasCompletedOnboarding = defaults.bool(forKey: "hasCompletedOnboarding")

@@ -130,6 +130,7 @@ final class SuggestionController: ObservableObject {
     }
 
     func stop() {
+        endJournalSession()
         commitMemory()
         tracker.stop()
         tap.stop()
@@ -309,6 +310,7 @@ final class SuggestionController: ObservableObject {
     }
 
     private func setField(_ info: FieldInfo?) {
+        endJournalSession()
         commitMemory()
         hide()
         field = info
@@ -322,6 +324,7 @@ final class SuggestionController: ObservableObject {
         currentFieldEligible = fieldEligible
         assembler.reset()
         guard let info, fieldEligible else { return }
+        beginJournalSession(info)
         readInitialSnapshot(info, attempt: 0)
     }
 
@@ -580,27 +583,38 @@ final class SuggestionController: ObservableObject {
         options.allowMidLine = prefs.midLineSuggestions
         var request = CompletionRequest(context: assembler.header, prefix: snapshot.prefix, suffix: snapshot.suffix, options: options)
         request.afterAcceptance = lastKey == .accept
+        let eagerness = prefs.eagerness + bias
         Task { [weak self] in
             let result = await engine.complete(request)
+            @MainActor func journal(_ outcome: String) {
+                self?.journalDecision(request, result: result, outcome: outcome, serial: serial, eagerness: eagerness)
+            }
             if TestBench.isDebugging {
                 let line = "request …\(request.prefix.suffix(40).debugDescription) → \(result.map { "\($0.text.debugDescription) p=\(String(format: "%.2f", $0.probability)) \(Int($0.milliseconds))ms" } ?? "nil")\n"
                 FileHandle.standardError.write(line.data(using: .utf8)!)
             }
             guard let self else { return }
             self.finishedSerial = max(self.finishedSerial, serial)
-            guard serial == self.requestSerial, let result else { return }
+            // A newer keystroke already asked again: this answer was never going to be used.
+            guard serial == self.requestSerial else { return }
+            guard let result else { journal("none"); return }
             // Turned off meanwhile, or the user kept typing before the app showed it.
-            guard self.fieldEligible, self.prefs.isActive, self.keySequence == keysAtRequest else { return }
+            guard self.fieldEligible, self.prefs.isActive, self.keySequence == keysAtRequest else { journal("late"); return }
             // Finishing the word under the caret into a non-word ("whos" + "pends") is worse than nothing.
-            if self.wordChecker.breaksWord(prefix: request.prefix, suggestion: result.text, context: request.context) { return }
+            if self.wordChecker.breaksWord(prefix: request.prefix, suggestion: result.text, context: request.context) {
+                journal("non-word")
+                return
+            }
             guard let current = self.lastSnapshot, current.info == snapshot.info, current.prefix == snapshot.prefix,
-                  !current.hasSelection, self.active?.isCorrection != true else { return }
+                  !current.hasSelection, self.active?.isCorrection != true else { journal("late"); return }
             self.models.recordLatency(result.milliseconds)
-            self.present(result, snapshot: current)
+            journal(self.present(result, snapshot: current))
         }
     }
 
-    private func present(_ completion: Completion, snapshot: FieldSnapshot) {
+    /// Shows a suggestion; returns how ("inline", "pill") or "not shown".
+    @discardableResult
+    private func present(_ completion: Completion, snapshot: FieldSnapshot) -> String {
         // Chromium without its full accessibility mode has no caret geometry mid-line, and the
         // suggestion falls back to a pill: switch the mode back on for the next keystroke.
         if snapshot.info.engine == .blink, snapshot.caret == nil || snapshot.caretIsEstimated,
@@ -610,11 +624,13 @@ final class SuggestionController: ObservableObject {
         let lineSuffix = snapshot.lineSuffix.trimmingCharacters(in: .whitespaces)
         let preferPill = completion.kind == .insertion || !lineSuffix.isEmpty
         guard let shown = presenter.show(completion.text, snapshot: snapshot, preferPill: preferPill),
-              !shown.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+              !shown.trimmingCharacters(in: .whitespaces).isEmpty else { return "not shown" }
         let version = tapState.publish(visible: true, remaining: shown, isCorrection: false)
         active = Active(remaining: shown, anchorPrefix: snapshot.prefix,
                         kind: completion.kind == .insertion ? .insertion : .continuation, version: version)
         stats.shown += 1
+        if shown != completion.text { return presenter.isInline ? "inline, cut to \"\(shown)\"" : "pill, cut to \"\(shown)\"" }
+        return presenter.isInline ? "inline" : "pill"
     }
 
     // MARK: Type-through, accept, dismiss
@@ -643,6 +659,8 @@ final class SuggestionController: ObservableObject {
             : Self.nextWord(of: current.remaining, after: current.anchorPrefix.last,
                             includePunctuation: Preferences.shared.wordIncludesPunctuation)
         guard !text.isEmpty else { hide(); return }
+        journalEvent("accept", prefix: current.anchorPrefix, suggestion: text,
+                     detail: ["whole": all, "left": String(current.remaining.dropFirst(text.count))])
         TextInserter.type(text)
         noteWriting(.text(text))
         noteAccepted(characters: text.count, explicit: true)
@@ -727,6 +745,10 @@ final class SuggestionController: ObservableObject {
 
     private func dismiss() {
         if case .correction(let c) = active?.kind { typo.ignore(c.original) }
+        if let current = active {
+            journalEvent("dismiss", prefix: current.anchorPrefix, suggestion: current.remaining,
+                         detail: ["correction": current.isCorrection])
+        }
         if let bundle = field?.bundleID, !TestBench.isDebugging {
             appBias[bundle] = max(-0.2, (appBias[bundle] ?? 0) - 0.02)
             UserDefaults.standard.set(appBias, forKey: "appBias")
@@ -788,6 +810,7 @@ final class SuggestionController: ObservableObject {
                              correction: correction.original, correctionRect: anchor ?? snapshot.caret) != nil else { return }
         let version = tapState.publish(visible: true, remaining: "", isCorrection: true)
         active = Active(remaining: "", anchorPrefix: snapshot.prefix, kind: .correction(correction), version: version)
+        journalEvent("typo shown", prefix: snapshot.prefix, suggestion: correction.replacement, detail: ["word": correction.original])
     }
 
     private func applyCorrection(_ correction: TypoCorrector.Correction) {
@@ -795,12 +818,58 @@ final class SuggestionController: ObservableObject {
         // Backspaces are blind: only send them if the text still ends with the word being fixed.
         guard let current = lastSnapshot, current.prefix.hasSuffix(correction.original + correction.trailing) else { return }
         let deleteCount = correction.original.count + correction.trailing.count
+        journalEvent("typo fixed", prefix: current.prefix, suggestion: correction.replacement, detail: ["word": correction.original])
         TextInserter.backspace(count: deleteCount)
         TextInserter.type(correction.replacement + correction.trailing)
         lastKey = .accept
         lastKeyTime = ProcessInfo.processInfo.systemUptime
         suppressUntilBoundary = false
         for delay in [0.02, 0.08, 0.2] { scheduleSnapshot(after: delay) }
+    }
+
+    // MARK: Journal
+
+    private var journalSession: Int64?
+    private var journaling: Bool { (prefs.keepJournal && !TestBench.isDebugging) || TestBench.journalsToTemporaryFile }
+
+    private func beginJournalSession(_ info: FieldInfo) {
+        guard journaling else { journalSession = nil; return }
+        var field: [String: Any] = ["role": info.role ?? "", "engine": info.engine.rawValue, "rich": info.isRichText,
+                                    "singleLine": info.isSingleLine]
+        if let label = info.label { field["label"] = label }
+        if info.isCodeMirror { field["codeMirror"] = true }
+        journalSession = Journal.shared.beginSession(app: info.appName, bundleID: info.bundleID, title: info.windowTitle,
+                                                     site: info.domain, field: field)
+    }
+
+    /// Leaving a field: what it ended up holding is what the user wrote, to judge suggestions by.
+    private func endJournalSession() {
+        defer { journalSession = nil }
+        guard journaling, let session = journalSession, let snapshot = lastSnapshot else { return }
+        Journal.shared.record("end", session: session, prefix: String(snapshot.prefix.suffix(8000)),
+                              suffix: String(snapshot.suffix.prefix(2000)))
+    }
+
+    private func journalDecision(_ request: CompletionRequest, result: Completion?, outcome: String, serial: Int,
+                                 eagerness: Double) {
+        guard journaling, let session = journalSession else { return }
+        var detail: [String: Any] = ["outcome": outcome, "serial": serial, "eagerness": eagerness,
+                                     "afterAccept": request.afterAcceptance]
+        if let result {
+            detail["p"] = result.probability
+            detail["first"] = result.firstWordProbability
+            detail["ms"] = Int(result.milliseconds.rounded())
+            detail["stop"] = result.stopReason
+            detail["kind"] = result.kind.rawValue
+        }
+        Journal.shared.record("decision", session: session, app: field?.appName, context: request.context,
+                              prefix: String(request.prefix.suffix(500)), suffix: String(request.suffix.prefix(200)),
+                              suggestion: result?.text, detail: detail)
+    }
+
+    private func journalEvent(_ kind: String, prefix: String, suggestion: String, detail: [String: Any] = [:]) {
+        guard journaling, let session = journalSession else { return }
+        Journal.shared.record(kind, session: session, prefix: String(prefix.suffix(200)), suggestion: suggestion, detail: detail)
     }
 
     // MARK: Memory
