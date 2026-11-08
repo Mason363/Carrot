@@ -1,12 +1,12 @@
-First release.
+![Carrot suggesting a reply as gray text](https://raw.githubusercontent.com/Mason363/Carrot/v1.0.0/docs/demo.gif)
 
-- Suggests a few words at a time, inline in any app, in the text's own font, size and baseline
-- Tab takes the next word, Shift-Tab the whole suggestion; keep typing and it follows along
-- Long suggestions continue onto the next line the way the field wraps
-- Optional exact placement in browsers (Settings › Appearance; uses Screen Recording, nothing is stored)
-- Mid-word, end-of-line and mid-line suggestions; typo corrections
-- Reads Obsidian notes as Markdown (headings, tasks, lists), in Live Preview and source mode
-- Context from the screen (including the windows behind or beside the one you write in), the clipboard, your earlier writing and your profile
-- Runs entirely on your Mac (Qwen3.5 base models via llama.cpp on Metal)
+**Autocomplete for everything you write on a Mac.** Free, unlimited, and it never leaves your Mac.
 
-Requires an Apple silicon Mac with macOS 14 or later.
+- Gray suggestions right where you type, in the field's own font: <kbd>Tab</kbd> takes the next word, <kbd>⇧</kbd><kbd>Tab</kbd> all of it
+- <kbd>⌥</kbd><kbd>\\</kbd> asks for a suggestion anywhere it stayed quiet
+- Uses what's on screen: the email you're answering, the page behind your note, what you've written before
+- Works in Mail, Messages, Slack, Notion, Obsidian, Google Docs, browsers and Electron apps
+- Fixes typos, finishes words mid-word, and wraps long suggestions like the field does
+- Runs on your Mac's GPU with Qwen3.5 base models via llama.cpp; nothing you type is sent anywhere
+
+Requires a Mac with Apple silicon and macOS 14 or later. Open **Carrot-1.0.0.dmg** and drag Carrot to Applications.
