@@ -131,4 +131,4 @@ llama.cpp comes from its official XCFramework release, pinned by checksum in `Ca
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Model weights have their own licenses (Qwen3.5: Apache 2.0).
+[GNU GPL v3](LICENSE). Model weights have their own licenses (Qwen3.5: Apache 2.0); llama.cpp is MIT.

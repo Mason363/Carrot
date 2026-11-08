@@ -29,7 +29,7 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>Free and open source under the MIT License.</string>
+	<string>Free software under the GNU General Public License v3.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>
